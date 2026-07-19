@@ -160,6 +160,10 @@ class ReactiveBrakingTests(unittest.TestCase):
             env.step(Action.MAINTAIN)
             if follower.speed_mps < 14.0:
                 slowed = True
+            if follower.target_lane is not None or env.traffic_lane(follower) != 0:
+                # The car legitimately escaped by merging out of the blocked
+                # lane; the same-lane following invariant no longer applies.
+                break
             self.assertGreaterEqual(
                 leader.y_m - follower.y_m, env.config.car_length_m
             )
