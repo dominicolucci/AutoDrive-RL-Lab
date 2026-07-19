@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from .config import DQNConfig, EnvConfig
+from .config import DQNConfig, EnvConfig, ScenarioSpec, resolve_scenario
 from .dqn import DQNAgent
 from .environment import DrivingEnv
 
@@ -23,6 +23,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, default=900)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--scenario", choices=("lane", "traffic"), default="traffic")
+    parser.add_argument(
+        "--scenario-preset",
+        choices=("sparse", "normal", "dense", "random"),
+        default="random",
+        help="world conditions for full-traffic episodes (default: random)",
+    )
+    parser.add_argument("--traffic", type=int, default=None, help="override car count")
+    parser.add_argument("--obstacles", type=int, default=None, help="override obstacle count")
+    parser.add_argument("--reactive", type=float, default=None, help="override reactive fraction 0..1")
     parser.add_argument(
         "--curriculum",
         action=argparse.BooleanOptionalAction,
@@ -85,6 +94,10 @@ def train(
     seed: int = 7,
     scenario: str = "traffic",
     curriculum: bool = True,
+    scenario_preset: str = "random",
+    traffic: int | None = None,
+    obstacles: int | None = None,
+    reactive: float | None = None,
     eval_every: int = 25,
     eval_episodes: int = 3,
     log_every: int = 5,
@@ -117,8 +130,10 @@ def train(
         if curriculum and scenario == "traffic"
         else 0
     )
+    scenario_rng = np.random.default_rng(seed + 777_777)
 
     for episode in range(1, episodes + 1):
+        episode_spec: ScenarioSpec | None = None
         if episode <= lane_curriculum_end:
             env_scenario = "lane"
             episode_scenario = "lane"
@@ -134,7 +149,17 @@ def train(
             env_scenario = scenario
             episode_scenario = scenario
             episode_config = env_config
-        env = DrivingEnv(episode_config, scenario=env_scenario, seed=seed + episode)
+            if scenario == "traffic":
+                episode_spec = resolve_scenario(
+                    scenario_preset,
+                    traffic=traffic,
+                    obstacles=obstacles,
+                    reactive=reactive,
+                    rng=scenario_rng,
+                )
+        env = DrivingEnv(
+            episode_config, scenario=env_scenario, seed=seed + episode, scenario_spec=episode_spec
+        )
         observation, _ = env.reset(seed=seed + episode)
         episode_return = 0.0
         episode_losses: list[float] = []
@@ -167,6 +192,11 @@ def train(
         record: dict[str, Any] = {
             "episode": episode,
             "scenario": episode_scenario,
+            "traffic_count": sum(1 for car in env.traffic if car.behavior != "obstacle"),
+            "obstacle_count": sum(1 for car in env.traffic if car.behavior == "obstacle"),
+            "reactive_fraction": round(episode_spec.reactive_fraction, 4)
+            if episode_spec is not None
+            else 0.0,
             "steps": final_info["steps"],
             "return": round(episode_return, 5),
             "rolling_return_20": round(fmean(recent_returns), 5),
@@ -236,6 +266,10 @@ def main(argv: list[str] | None = None) -> None:
         seed=args.seed,
         scenario=args.scenario,
         curriculum=args.curriculum,
+        scenario_preset=args.scenario_preset,
+        traffic=args.traffic,
+        obstacles=args.obstacles,
+        reactive=args.reactive,
         eval_every=args.eval_every,
         eval_episodes=args.eval_episodes,
         log_every=args.log_every,
