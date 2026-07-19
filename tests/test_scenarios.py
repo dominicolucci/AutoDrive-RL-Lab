@@ -110,6 +110,15 @@ class ObstacleSpawnTests(unittest.TestCase):
         self.assertEqual(len(env.traffic), env.config.traffic_count)
         self.assertTrue(all(car.behavior == "cruiser" for car in env.traffic))
 
+    def test_dense_preset_places_all_requested_obstacles(self) -> None:
+        for seed in range(30):
+            env = self.make_env(
+                seed,
+                ScenarioSpec(traffic_count=14, obstacle_count=2, reactive_fraction=0.5),
+            )
+            obstacles = sum(1 for car in env.traffic if car.behavior == "obstacle")
+            self.assertEqual(obstacles, 2)
+
 
 class LaneAttributionTests(unittest.TestCase):
     def make_env(self) -> DrivingEnv:
@@ -328,6 +337,23 @@ class TrainingIntegrationTests(unittest.TestCase):
             (r["traffic_count"], r["obstacle_count"], r["reactive_fraction"]) for r in second
         ]
         self.assertEqual(first_conditions, second_conditions)
+
+    def test_invalid_override_fails_fast(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            with self.assertRaises(ValueError):
+                train(
+                    episodes=5,
+                    env_config=replace(EnvConfig(), max_steps=40),
+                    seed=1,
+                    curriculum=True,
+                    eval_every=0,
+                    eval_episodes=1,
+                    log_every=100,
+                    traffic=-3,
+                    output_path=base / "m.npz",
+                    metrics_path=base / "m.csv",
+                )
 
 
 class MatrixEvaluationTests(unittest.TestCase):

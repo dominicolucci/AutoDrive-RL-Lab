@@ -349,8 +349,10 @@ class DrivingEnv:
         spec = self.scenario_spec
         count = cfg.traffic_count if spec is None else spec.traffic_count
         reactive_fraction = 0.0 if spec is None else spec.reactive_fraction
+        self._spawn_obstacles()
+        moving_target = count + len(self.traffic)
         attempts = 0
-        while len(self.traffic) < count and attempts < 500:
+        while len(self.traffic) < moving_target and attempts < 500:
             attempts += 1
             lane = int(self.rng.integers(0, cfg.lane_count))
             y_m = float(self.rng.uniform(22.0, cfg.sensor_range_m + 55.0))
@@ -362,7 +364,6 @@ class DrivingEnv:
             if reactive_fraction > 0.0 and self.rng.random() < reactive_fraction:
                 behavior = "reactive"
             self.traffic.append(TrafficCar(lane, y_m, speed, color_index, behavior=behavior))
-        self._spawn_obstacles()
 
     def _spawn_obstacles(self) -> None:
         spec = self.scenario_spec
@@ -385,13 +386,26 @@ class DrivingEnv:
 
     def _obstacle_position_ok(self, lane: int, y_m: float) -> bool:
         cfg = self.config
-        blocked = {lane}
-        for car in self.traffic:
-            if car.lane == lane and abs(car.y_m - y_m) < 24.0:
+        obstacles = [(car.lane, car.y_m) for car in self.traffic if car.behavior == "obstacle"]
+        for other_lane, other_y in obstacles:
+            if other_lane == lane and abs(other_y - y_m) < 24.0:
                 return False
-            if car.behavior == "obstacle" and abs(car.y_m - y_m) < OBSTACLE_WINDOW_M:
-                blocked.add(car.lane)
-        return len(blocked) < cfg.lane_count
+        # Checking only the candidate's own window is not enough: two
+        # obstacles can each individually clear an existing obstacle's
+        # window yet jointly box it in (a chain, e.g. A-B close, B-C close,
+        # A-C far apart). Re-check every obstacle's window with the
+        # candidate hypothetically added so no lane position ever ends up
+        # fully blocked.
+        candidates = obstacles + [(lane, y_m)]
+        for center_lane, center_y in candidates:
+            blocked = {
+                other_lane
+                for other_lane, other_y in candidates
+                if abs(other_y - center_y) < OBSTACLE_WINDOW_M
+            }
+            if len(blocked) >= cfg.lane_count:
+                return False
+        return True
 
     def _recycle_traffic(self) -> None:
         if self.scenario != "traffic":
