@@ -142,7 +142,10 @@ class TopDownRenderer:
         for car in visible_cars:
             screen_y = self.ego_screen_y - car.y_m * self.longitudinal_scale
             if -60 <= screen_y <= self.height + 60:
-                x = self._world_x_to_screen(env, env.lane_center(car.lane))
+                x = self._world_x_to_screen(env, env.traffic_x_m(car))
+                if car.behavior == "obstacle":
+                    self._draw_obstacle(x, screen_y)
+                    continue
                 color = self.traffic_colors[car.color_index % len(self.traffic_colors)]
                 self._draw_car(x, screen_y, color, label=f"{car.speed_mps * 2.236936:.0f}")
 
@@ -225,6 +228,28 @@ class TopDownRenderer:
         self.canvas.create_rectangle(x - 29, y + 13, x - 23, y + 31, fill="#080b0f", outline="")
         self.canvas.create_rectangle(x + 23, y + 13, x + 29, y + 31, fill="#080b0f", outline="")
         self.canvas.create_text(x, y + 25, text=label, fill="white", font=("Arial", 9, "bold"))
+
+    def _draw_obstacle(self, x: float, y: float) -> None:
+        half_width = 25
+        half_length = 30
+        self.canvas.create_rectangle(
+            x - half_width,
+            y - half_length,
+            x + half_width,
+            y + half_length,
+            fill="#3b3f46",
+            outline="#ffca3a",
+            width=3,
+        )
+        for offset in range(-half_length + 8, half_length, 14):
+            self.canvas.create_line(
+                x - half_width + 4,
+                y + offset + 10,
+                x + half_width - 4,
+                y + offset - 4,
+                fill="#ffca3a",
+                width=4,
+            )
 
     def _draw_dashboard(
         self,
