@@ -106,5 +106,44 @@ class ObstacleSpawnTests(unittest.TestCase):
         self.assertTrue(all(car.behavior == "cruiser" for car in env.traffic))
 
 
+class LaneAttributionTests(unittest.TestCase):
+    def make_env(self) -> DrivingEnv:
+        config = replace(EnvConfig(), max_steps=50)
+        return DrivingEnv(config, scenario="lane", seed=1)
+
+    def test_traffic_x_interpolates_between_lane_centers(self) -> None:
+        env = self.make_env()
+        car = TrafficCar(0, 50.0, 20.0, target_lane=1, lane_change_progress=0.5)
+        expected = (env.lane_center(0) + env.lane_center(1)) / 2.0
+        self.assertAlmostEqual(env.traffic_x_m(car), expected)
+
+    def test_mid_change_car_attributed_to_nearest_lane(self) -> None:
+        env = self.make_env()
+        car = TrafficCar(0, 50.0, 20.0, target_lane=1, lane_change_progress=0.1)
+        self.assertEqual(env.traffic_lane(car), 0)
+        car.lane_change_progress = 0.9
+        self.assertEqual(env.traffic_lane(car), 1)
+
+    def test_collision_uses_actual_x(self) -> None:
+        env = self.make_env()
+        ego_lane = env.current_lane
+        car = TrafficCar(ego_lane - 1, 0.0, 12.0, target_lane=ego_lane)
+        car.lane_change_progress = 0.0
+        env.traffic = [car]
+        self.assertFalse(env._has_collision())
+        car.lane_change_progress = 0.95
+        self.assertTrue(env._has_collision())
+
+    def test_sensors_see_mid_change_car_in_target_lane(self) -> None:
+        env = self.make_env()
+        ego_lane = env.current_lane
+        car = TrafficCar(ego_lane - 1, 40.0, 12.0, target_lane=ego_lane)
+        car.lane_change_progress = 0.9
+        env.traffic = [car]
+        sensors = env.sensor_snapshot()
+        front = np.asarray(sensors["front_gaps_m"])
+        self.assertLess(front[ego_lane], env.config.sensor_range_m)
+
+
 if __name__ == "__main__":
     unittest.main()
