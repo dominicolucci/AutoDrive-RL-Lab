@@ -43,7 +43,10 @@ Per step, a reactive car:
   term is the stopping distance at the current closing speed — a pure
   headway rule brakes too late against stopped obstacles (at 22 m/s it
   would trigger 33 m out but stopping takes ~60 m). Cruisers keep today's
-  constant-speed behavior.
+  constant-speed behavior toward other cars, but brake for static obstacles
+  using the same threshold (user-approved amendment: without this, cruisers
+  drive through obstacles, since traffic-vs-traffic contact is not
+  physically resolved).
 - **Lane changes:** eligible only when held below 80% of cruise speed. With
   a per-step probability of 0.5%, evaluate adjacent lanes: candidate
   must have a larger front gap than the current lane and safe front/rear
