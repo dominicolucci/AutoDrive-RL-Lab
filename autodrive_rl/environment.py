@@ -40,6 +40,7 @@ OBSTACLE_EGO_CLEAR_M = 60.0
 REACTIVE_TIME_HEADWAY_S = 1.5
 REACTIVE_BRAKE_MPS2 = 4.0
 REACTIVE_ACCEL_MPS2 = 2.0
+REACTIVE_MIN_GAP_M = 2.0
 
 
 @dataclass
@@ -423,7 +424,8 @@ class DrivingEnv:
         assert car.cruise_speed_mps is not None
         closing = max(0.0, car.speed_mps - leader_speed)
         threshold = (
-            REACTIVE_TIME_HEADWAY_S * car.speed_mps
+            REACTIVE_MIN_GAP_M
+            + REACTIVE_TIME_HEADWAY_S * car.speed_mps
             + closing**2 / (2.0 * REACTIVE_BRAKE_MPS2)
         )
         if gap < threshold:
