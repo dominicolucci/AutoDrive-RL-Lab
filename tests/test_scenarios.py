@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,7 @@ from autodrive_rl.config import (
 )
 from autodrive_rl.dqn import DQNAgent
 from autodrive_rl.environment import Action, DrivingEnv, TrafficCar
+from autodrive_rl.train import build_parser, train
 
 
 class ScenarioSpecTests(unittest.TestCase):
@@ -278,6 +280,53 @@ class CheckpointCompatibilityTests(unittest.TestCase):
             observation, _, terminated, truncated, _ = env.step(action)
             if terminated or truncated:
                 break
+
+
+class TrainingIntegrationTests(unittest.TestCase):
+    def test_parser_has_scenario_flags(self) -> None:
+        args = build_parser().parse_args([])
+        self.assertEqual(args.scenario_preset, "random")
+        self.assertIsNone(args.traffic)
+        args = build_parser().parse_args(
+            ["--scenario-preset", "dense", "--traffic", "6", "--reactive", "0.3"]
+        )
+        self.assertEqual(args.scenario_preset, "dense")
+        self.assertEqual(args.traffic, 6)
+        self.assertEqual(args.reactive, 0.3)
+
+    def test_randomized_training_records_conditions_reproducibly(self) -> None:
+        def run(directory: str) -> list[dict[str, object]]:
+            base = Path(directory)
+            _, records = train(
+                episodes=6,
+                env_config=replace(EnvConfig(), max_steps=60),
+                seed=11,
+                curriculum=False,
+                eval_every=0,
+                eval_episodes=1,
+                log_every=100,
+                scenario_preset="random",
+                output_path=base / "m.npz",
+                metrics_path=base / "m.csv",
+            )
+            return records
+
+        with tempfile.TemporaryDirectory() as first_dir:
+            first = run(first_dir)
+        with tempfile.TemporaryDirectory() as second_dir:
+            second = run(second_dir)
+        for record in first:
+            self.assertIn("traffic_count", record)
+            self.assertIn("obstacle_count", record)
+            self.assertIn("reactive_fraction", record)
+            self.assertTrue(4 <= int(record["traffic_count"]) <= 14)
+        first_conditions = [
+            (r["traffic_count"], r["obstacle_count"], r["reactive_fraction"]) for r in first
+        ]
+        second_conditions = [
+            (r["traffic_count"], r["obstacle_count"], r["reactive_fraction"]) for r in second
+        ]
+        self.assertEqual(first_conditions, second_conditions)
 
 
 if __name__ == "__main__":
