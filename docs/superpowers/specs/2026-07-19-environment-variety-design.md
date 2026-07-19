@@ -36,7 +36,9 @@ Per step, a reactive car:
 
 - **Time-headway braking:** find the nearest thing ahead in its lane
   (traffic, obstacle, or the ego car). Brake (up to 4.0 m/s^2) when
-  gap < 1.5 s x current speed + closing_speed^2 / (2 x 4.0 m/s^2); otherwise
+  gap < 2.0 m + 1.5 s x current speed + closing_speed^2 / (2 x 4.0 m/s^2)
+  (the 2.0 m standstill margin prevents creeping into contact as speed
+  approaches zero); otherwise
   accelerate up to 2.0 m/s^2 back toward `cruise_speed_mps`. The second
   term is the stopping distance at the current closing speed — a pure
   headway rule brakes too late against stopped obstacles (at 22 m/s it
