@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 from collections import deque
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -15,6 +15,7 @@ import numpy as np
 from .config import DQNConfig, EnvConfig, SCENARIO_PRESETS, ScenarioSpec, resolve_scenario
 from .dqn import DQNAgent
 from .environment import DrivingEnv
+from .tracking import create_tracker, git_commit_tag
 
 EVAL_CELLS = ("sparse", "normal", "dense")
 
@@ -34,6 +35,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--traffic", type=int, default=None, help="override car count")
     parser.add_argument("--obstacles", type=int, default=None, help="override obstacle count")
     parser.add_argument("--reactive", type=float, default=None, help="override reactive fraction 0..1")
+    parser.add_argument(
+        "--tracking",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="log this run to the local MLflow store (default: on)",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="MLflow run name (default: <output-stem>-seed<seed>)",
+    )
     parser.add_argument(
         "--curriculum",
         action=argparse.BooleanOptionalAction,
@@ -106,6 +119,9 @@ def train(
     traffic: int | None = None,
     obstacles: int | None = None,
     reactive: float | None = None,
+    tracking: bool = False,
+    tracking_uri: str | None = None,
+    run_name: str | None = None,
     eval_every: int = 25,
     eval_episodes: int = 3,
     log_every: int = 5,
@@ -135,6 +151,26 @@ def train(
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     best_path = output_path.with_name(f"{output_path.stem}_best{output_path.suffix}")
     best_eval_return = -np.inf
+    tracker = create_tracker(
+        tracking,
+        run_name or f"{output_path.stem}-seed{seed}",
+        tracking_uri=tracking_uri,
+    )
+    tracker.log_params(
+        {
+            **asdict(agent.config),
+            **asdict(env_config),
+            "episodes": episodes,
+            "seed": seed,
+            "scenario": scenario,
+            "curriculum": curriculum,
+            "scenario_preset": scenario_preset,
+            "traffic": traffic,
+            "obstacles": obstacles,
+            "reactive": reactive,
+        }
+    )
+    tracker.set_tags(git_commit_tag())
     recent_returns: deque[float] = deque(maxlen=20)
     records: list[dict[str, Any]] = []
 
@@ -148,147 +184,164 @@ def train(
     )
     scenario_rng = np.random.default_rng(seed + 777_777)
 
-    for episode in range(1, episodes + 1):
-        episode_spec: ScenarioSpec | None = None
-        if episode <= lane_curriculum_end:
-            env_scenario = "lane"
-            episode_scenario = "lane"
-            episode_config = env_config
-        elif episode <= light_traffic_end:
-            env_scenario = "traffic"
-            episode_scenario = "light_traffic"
-            episode_config = replace(
-                env_config,
-                traffic_count=max(3, env_config.traffic_count // 2),
-            )
-        else:
-            env_scenario = scenario
-            episode_scenario = scenario
-            episode_config = env_config
-            if scenario == "traffic":
-                episode_spec = resolve_scenario(
-                    scenario_preset,
-                    traffic=traffic,
-                    obstacles=obstacles,
-                    reactive=reactive,
-                    rng=scenario_rng,
+    try:
+        for episode in range(1, episodes + 1):
+            episode_spec: ScenarioSpec | None = None
+            if episode <= lane_curriculum_end:
+                env_scenario = "lane"
+                episode_scenario = "lane"
+                episode_config = env_config
+            elif episode <= light_traffic_end:
+                env_scenario = "traffic"
+                episode_scenario = "light_traffic"
+                episode_config = replace(
+                    env_config,
+                    traffic_count=max(3, env_config.traffic_count // 2),
                 )
-        env = DrivingEnv(
-            episode_config, scenario=env_scenario, seed=seed + episode, scenario_spec=episode_spec
-        )
-        observation, _ = env.reset(seed=seed + episode)
-        episode_return = 0.0
-        episode_losses: list[float] = []
-        speed_sum = 0.0
-        final_info: dict[str, Any] = {}
+            else:
+                env_scenario = scenario
+                episode_scenario = scenario
+                episode_config = env_config
+                if scenario == "traffic":
+                    episode_spec = resolve_scenario(
+                        scenario_preset,
+                        traffic=traffic,
+                        obstacles=obstacles,
+                        reactive=reactive,
+                        rng=scenario_rng,
+                    )
+            env = DrivingEnv(
+                episode_config, scenario=env_scenario, seed=seed + episode, scenario_spec=episode_spec
+            )
+            observation, _ = env.reset(seed=seed + episode)
+            episode_return = 0.0
+            episode_losses: list[float] = []
+            speed_sum = 0.0
+            final_info: dict[str, Any] = {}
 
-        while True:
-            action = agent.act(observation, explore=True)
-            next_observation, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            agent.observe(observation, action, reward, next_observation, done)
-            learn_result = agent.learn()
-            if learn_result is not None:
-                episode_losses.append(learn_result.loss)
-            observation = next_observation
-            episode_return += reward
-            speed_sum += float(info["speed_mps"])
-            final_info = info
-            if done:
-                break
+            while True:
+                action = agent.act(observation, explore=True)
+                next_observation, reward, terminated, truncated, info = env.step(action)
+                done = terminated or truncated
+                agent.observe(observation, action, reward, next_observation, done)
+                learn_result = agent.learn()
+                if learn_result is not None:
+                    episode_losses.append(learn_result.loss)
+                observation = next_observation
+                episode_return += reward
+                speed_sum += float(info["speed_mps"])
+                final_info = info
+                if done:
+                    break
 
-        recent_returns.append(episode_return)
-        if final_info["collision"]:
-            outcome = "collision"
-        elif final_info["off_road"]:
-            outcome = "off_road"
-        else:
-            outcome = "complete"
+            recent_returns.append(episode_return)
+            if final_info["collision"]:
+                outcome = "collision"
+            elif final_info["off_road"]:
+                outcome = "off_road"
+            else:
+                outcome = "complete"
 
-        record: dict[str, Any] = {
-            "episode": episode,
-            "scenario": episode_scenario,
-            "traffic_count": sum(1 for car in env.traffic if car.behavior != "obstacle"),
-            "obstacle_count": sum(1 for car in env.traffic if car.behavior == "obstacle"),
-            "reactive_fraction": round(episode_spec.reactive_fraction, 4)
-            if episode_spec is not None
-            else 0.0,
-            "steps": final_info["steps"],
-            "return": round(episode_return, 5),
-            "rolling_return_20": round(fmean(recent_returns), 5),
-            "distance_m": round(float(final_info["distance_m"]), 3),
-            "mean_speed_mps": round(speed_sum / int(final_info["steps"]), 4),
-            "outcome": outcome,
-            "epsilon": round(agent.epsilon, 6),
-            "mean_loss": round(fmean(episode_losses), 6) if episode_losses else "",
-            "eval_return": "",
-            "eval_distance_m": "",
-            "eval_safe_rate": "",
-        }
-        for cell in EVAL_CELLS:
-            record[f"eval_{cell}_return"] = ""
-            record[f"eval_{cell}_safe_rate"] = ""
+            record: dict[str, Any] = {
+                "episode": episode,
+                "scenario": episode_scenario,
+                "traffic_count": sum(1 for car in env.traffic if car.behavior != "obstacle"),
+                "obstacle_count": sum(1 for car in env.traffic if car.behavior == "obstacle"),
+                "reactive_fraction": round(episode_spec.reactive_fraction, 4)
+                if episode_spec is not None
+                else 0.0,
+                "steps": final_info["steps"],
+                "return": round(episode_return, 5),
+                "rolling_return_20": round(fmean(recent_returns), 5),
+                "distance_m": round(float(final_info["distance_m"]), 3),
+                "mean_speed_mps": round(speed_sum / int(final_info["steps"]), 4),
+                "outcome": outcome,
+                "epsilon": round(agent.epsilon, 6),
+                "mean_loss": round(fmean(episode_losses), 6) if episode_losses else "",
+                "eval_return": "",
+                "eval_distance_m": "",
+                "eval_safe_rate": "",
+            }
+            for cell in EVAL_CELLS:
+                record[f"eval_{cell}_return"] = ""
+                record[f"eval_{cell}_safe_rate"] = ""
 
-        should_evaluate = eval_every > 0 and (episode % eval_every == 0 or episode == episodes)
-        if should_evaluate:
-            if scenario == "traffic":
-                cell_results: dict[str, dict[str, float]] = {}
-                for cell_index, cell in enumerate(EVAL_CELLS):
-                    cell_results[cell] = evaluate(
+            should_evaluate = eval_every > 0 and (episode % eval_every == 0 or episode == episodes)
+            if should_evaluate:
+                if scenario == "traffic":
+                    cell_results: dict[str, dict[str, float]] = {}
+                    for cell_index, cell in enumerate(EVAL_CELLS):
+                        cell_results[cell] = evaluate(
+                            agent,
+                            env_config,
+                            episodes=eval_episodes,
+                            seed=seed + 100_000 + episode * eval_episodes + 10_000 * cell_index,
+                            scenario=scenario,
+                            scenario_spec=SCENARIO_PRESETS[cell],
+                        )
+                    mean_return = fmean(result["return"] for result in cell_results.values())
+                    record["eval_return"] = round(mean_return, 5)
+                    record["eval_distance_m"] = round(
+                        fmean(result["distance_m"] for result in cell_results.values()), 3
+                    )
+                    record["eval_safe_rate"] = round(
+                        fmean(result["safe_rate"] for result in cell_results.values()), 4
+                    )
+                    for cell in EVAL_CELLS:
+                        record[f"eval_{cell}_return"] = round(cell_results[cell]["return"], 5)
+                        record[f"eval_{cell}_safe_rate"] = round(cell_results[cell]["safe_rate"], 4)
+                else:
+                    evaluation = evaluate(
                         agent,
                         env_config,
                         episodes=eval_episodes,
-                        seed=seed + 100_000 + episode * eval_episodes + 10_000 * cell_index,
+                        seed=seed + 100_000 + episode * eval_episodes,
                         scenario=scenario,
-                        scenario_spec=SCENARIO_PRESETS[cell],
                     )
-                mean_return = fmean(result["return"] for result in cell_results.values())
-                record["eval_return"] = round(mean_return, 5)
-                record["eval_distance_m"] = round(
-                    fmean(result["distance_m"] for result in cell_results.values()), 3
-                )
-                record["eval_safe_rate"] = round(
-                    fmean(result["safe_rate"] for result in cell_results.values()), 4
-                )
-                for cell in EVAL_CELLS:
-                    record[f"eval_{cell}_return"] = round(cell_results[cell]["return"], 5)
-                    record[f"eval_{cell}_safe_rate"] = round(cell_results[cell]["safe_rate"], 4)
-            else:
-                evaluation = evaluate(
-                    agent,
-                    env_config,
-                    episodes=eval_episodes,
-                    seed=seed + 100_000 + episode * eval_episodes,
-                    scenario=scenario,
-                )
-                mean_return = evaluation["return"]
-                record["eval_return"] = round(evaluation["return"], 5)
-                record["eval_distance_m"] = round(evaluation["distance_m"], 3)
-                record["eval_safe_rate"] = round(evaluation["safe_rate"], 4)
-            if mean_return > best_eval_return:
-                best_eval_return = mean_return
-                agent.save(best_path)
+                    mean_return = evaluation["return"]
+                    record["eval_return"] = round(evaluation["return"], 5)
+                    record["eval_distance_m"] = round(evaluation["distance_m"], 3)
+                    record["eval_safe_rate"] = round(evaluation["safe_rate"], 4)
+                if mean_return > best_eval_return:
+                    best_eval_return = mean_return
+                    agent.save(best_path)
 
-        records.append(record)
-        if episode % max(1, log_every) == 0 or episode == 1 or episode == episodes:
-            eval_text = (
-                f" eval={float(record['eval_return']):7.1f}"
-                if record["eval_return"] != ""
-                else ""
+            records.append(record)
+            tracker.log_metrics(
+                {
+                    **record,
+                    "outcome_collision": float(outcome == "collision"),
+                    "outcome_off_road": float(outcome == "off_road"),
+                    "outcome_complete": float(outcome == "complete"),
+                },
+                step=episode,
             )
-            print(
-                f"episode {episode:4d}/{episodes}  {episode_scenario:7s}  "
-                f"return={episode_return:8.1f}  avg20={fmean(recent_returns):8.1f}  "
-                f"steps={int(final_info['steps']):4d}  eps={agent.epsilon:.3f}  "
-                f"outcome={outcome}{eval_text}"
-            )
+            if episode % max(1, log_every) == 0 or episode == 1 or episode == episodes:
+                eval_text = (
+                    f" eval={float(record['eval_return']):7.1f}"
+                    if record["eval_return"] != ""
+                    else ""
+                )
+                print(
+                    f"episode {episode:4d}/{episodes}  {episode_scenario:7s}  "
+                    f"return={episode_return:8.1f}  avg20={fmean(recent_returns):8.1f}  "
+                    f"steps={int(final_info['steps']):4d}  eps={agent.epsilon:.3f}  "
+                    f"outcome={outcome}{eval_text}"
+                )
 
-    agent.save(output_path)
-    _write_metrics(metrics_path, records)
-    print(f"\nSaved final model: {output_path}")
-    print(f"Saved best model:  {best_path}")
-    print(f"Saved metrics:     {metrics_path}")
-    return agent, records
+        agent.save(output_path)
+        _write_metrics(metrics_path, records)
+        print(f"\nSaved final model: {output_path}")
+        print(f"Saved best model:  {best_path}")
+        print(f"Saved metrics:     {metrics_path}")
+        tracker.log_artifact(output_path)
+        tracker.log_artifact(best_path)
+        tracker.log_artifact(metrics_path)
+        tracker.end("FINISHED")
+        return agent, records
+    except BaseException:
+        tracker.end("FAILED")
+        raise
 
 
 def _write_metrics(path: Path, records: list[dict[str, Any]]) -> None:
@@ -313,6 +366,9 @@ def main(argv: list[str] | None = None) -> None:
         traffic=args.traffic,
         obstacles=args.obstacles,
         reactive=args.reactive,
+        tracking=args.tracking,
+        tracking_uri=None,
+        run_name=args.run_name,
         eval_every=args.eval_every,
         eval_episodes=args.eval_episodes,
         log_every=args.log_every,
