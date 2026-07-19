@@ -329,5 +329,33 @@ class TrainingIntegrationTests(unittest.TestCase):
         self.assertEqual(first_conditions, second_conditions)
 
 
+class MatrixEvaluationTests(unittest.TestCase):
+    def test_matrix_eval_fills_cells_and_mean(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            _, records = train(
+                episodes=2,
+                env_config=replace(EnvConfig(), max_steps=40),
+                seed=13,
+                curriculum=False,
+                eval_every=2,
+                eval_episodes=1,
+                log_every=100,
+                scenario_preset="normal",
+                output_path=base / "m.npz",
+                metrics_path=base / "m.csv",
+            )
+        final = records[-1]
+        cell_returns = []
+        for cell in ("sparse", "normal", "dense"):
+            self.assertNotEqual(final[f"eval_{cell}_return"], "")
+            self.assertNotEqual(final[f"eval_{cell}_safe_rate"], "")
+            cell_returns.append(float(final[f"eval_{cell}_return"]))
+        mean_return = sum(cell_returns) / len(cell_returns)
+        self.assertAlmostEqual(float(final["eval_return"]), mean_return, places=3)
+        first = records[0]
+        self.assertEqual(first["eval_sparse_return"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

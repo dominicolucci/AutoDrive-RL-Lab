@@ -12,9 +12,11 @@ from typing import Any
 
 import numpy as np
 
-from .config import DQNConfig, EnvConfig, ScenarioSpec, resolve_scenario
+from .config import DQNConfig, EnvConfig, SCENARIO_PRESETS, ScenarioSpec, resolve_scenario
 from .dqn import DQNAgent
 from .environment import DrivingEnv
+
+EVAL_CELLS = ("sparse", "normal", "dense")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,12 +63,18 @@ def evaluate(
     episodes: int,
     seed: int,
     scenario: str = "traffic",
+    scenario_spec: ScenarioSpec | None = None,
 ) -> dict[str, float]:
     returns: list[float] = []
     distances: list[float] = []
     safe_finishes = 0
     for episode_index in range(episodes):
-        env = DrivingEnv(env_config, scenario=scenario, seed=seed + episode_index)
+        env = DrivingEnv(
+            env_config,
+            scenario=scenario,
+            seed=seed + episode_index,
+            scenario_spec=scenario_spec,
+        )
         observation, _ = env.reset(seed=seed + episode_index)
         episode_return = 0.0
         while True:
@@ -209,21 +217,48 @@ def train(
             "eval_distance_m": "",
             "eval_safe_rate": "",
         }
+        for cell in EVAL_CELLS:
+            record[f"eval_{cell}_return"] = ""
+            record[f"eval_{cell}_safe_rate"] = ""
 
         should_evaluate = eval_every > 0 and (episode % eval_every == 0 or episode == episodes)
         if should_evaluate:
-            evaluation = evaluate(
-                agent,
-                env_config,
-                episodes=eval_episodes,
-                seed=seed + 100_000 + episode * eval_episodes,
-                scenario=scenario,
-            )
-            record["eval_return"] = round(evaluation["return"], 5)
-            record["eval_distance_m"] = round(evaluation["distance_m"], 3)
-            record["eval_safe_rate"] = round(evaluation["safe_rate"], 4)
-            if evaluation["return"] > best_eval_return:
-                best_eval_return = evaluation["return"]
+            if scenario == "traffic":
+                cell_results: dict[str, dict[str, float]] = {}
+                for cell_index, cell in enumerate(EVAL_CELLS):
+                    cell_results[cell] = evaluate(
+                        agent,
+                        env_config,
+                        episodes=eval_episodes,
+                        seed=seed + 100_000 + episode * eval_episodes + 10_000 * cell_index,
+                        scenario=scenario,
+                        scenario_spec=SCENARIO_PRESETS[cell],
+                    )
+                mean_return = fmean(result["return"] for result in cell_results.values())
+                record["eval_return"] = round(mean_return, 5)
+                record["eval_distance_m"] = round(
+                    fmean(result["distance_m"] for result in cell_results.values()), 3
+                )
+                record["eval_safe_rate"] = round(
+                    fmean(result["safe_rate"] for result in cell_results.values()), 4
+                )
+                for cell in EVAL_CELLS:
+                    record[f"eval_{cell}_return"] = round(cell_results[cell]["return"], 5)
+                    record[f"eval_{cell}_safe_rate"] = round(cell_results[cell]["safe_rate"], 4)
+            else:
+                evaluation = evaluate(
+                    agent,
+                    env_config,
+                    episodes=eval_episodes,
+                    seed=seed + 100_000 + episode * eval_episodes,
+                    scenario=scenario,
+                )
+                mean_return = evaluation["return"]
+                record["eval_return"] = round(evaluation["return"], 5)
+                record["eval_distance_m"] = round(evaluation["distance_m"], 3)
+                record["eval_safe_rate"] = round(evaluation["safe_rate"], 4)
+            if mean_return > best_eval_return:
+                best_eval_return = mean_return
                 agent.save(best_path)
 
         records.append(record)
