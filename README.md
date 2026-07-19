@@ -116,7 +116,8 @@ training experiment is moving in the right direction.
 ## Vary the world
 
 Scenario presets control traffic density, static obstacles, and how many
-drivers react (brake on short headway, change lanes when blocked):
+drivers react to other cars (brake on short headway, change lanes when
+blocked); all drivers brake for obstacles:
 
 ```bash
 python -m autodrive_rl.play --policy heuristic --scenario-preset dense

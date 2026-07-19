@@ -450,6 +450,8 @@ class DrivingEnv:
         for car in self.traffic:
             if car.behavior == "reactive":
                 self._update_reactive(car)
+            elif car.behavior == "cruiser":
+                self._update_cruiser(car)
             if car.target_lane is not None:
                 car.lane_change_progress += cfg.dt_seconds / LANE_CHANGE_DURATION_S
                 if car.lane_change_progress >= 1.0:
@@ -483,6 +485,33 @@ class DrivingEnv:
             and self.rng.random() < LANE_CHANGE_PROBABILITY
         ):
             self._maybe_start_lane_change(car, lane)
+
+    def _update_cruiser(self, car: TrafficCar) -> None:
+        """Cruisers are blind to other cars but brake for static obstacles."""
+
+        cfg = self.config
+        lane = self.traffic_lane(car)
+        gap = float("inf")
+        for other in self.traffic:
+            if other is car or other.behavior != "obstacle":
+                continue
+            if self.traffic_lane(other) == lane and other.y_m > car.y_m:
+                gap = min(gap, other.y_m - car.y_m - cfg.car_length_m)
+        assert car.cruise_speed_mps is not None
+        threshold = (
+            REACTIVE_MIN_GAP_M
+            + REACTIVE_TIME_HEADWAY_S * car.speed_mps
+            + car.speed_mps**2 / (2.0 * REACTIVE_BRAKE_MPS2)
+        )
+        if gap < threshold:
+            car.speed_mps = max(
+                0.0, car.speed_mps - REACTIVE_BRAKE_MPS2 * cfg.dt_seconds
+            )
+        elif car.speed_mps < car.cruise_speed_mps:
+            car.speed_mps = min(
+                car.cruise_speed_mps,
+                car.speed_mps + REACTIVE_ACCEL_MPS2 * cfg.dt_seconds,
+            )
 
     def _front_gap_for(self, car: TrafficCar, lane: int) -> tuple[float, float]:
         """Gap to the nearest leader in a lane, plus that leader's speed."""

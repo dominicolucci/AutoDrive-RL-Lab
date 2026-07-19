@@ -199,6 +199,30 @@ class ReactiveBrakingTests(unittest.TestCase):
             env.step(Action.MAINTAIN)
         self.assertEqual(car.speed_mps, 15.0)
 
+    def test_cruiser_still_blind_to_other_cars(self) -> None:
+        env = self.make_env()
+        leader = TrafficCar(0, 70.0, 5.0)
+        car = TrafficCar(0, 40.0, 20.0, behavior="cruiser")
+        env.traffic = [leader, car]
+        for _ in range(50):
+            env.step(Action.MAINTAIN)
+        self.assertEqual(car.speed_mps, 20.0)
+
+    def test_cruiser_brakes_for_obstacle(self) -> None:
+        env = self.make_env()
+        obstacle = TrafficCar(0, 80.0, 0.0, behavior="obstacle")
+        car = TrafficCar(0, 20.0, 15.0, behavior="cruiser")
+        env.traffic = [obstacle, car]
+        slowed = False
+        for _ in range(300):
+            env.step(Action.MAINTAIN)
+            if car.speed_mps < 14.0:
+                slowed = True
+            self.assertGreaterEqual(
+                obstacle.y_m - car.y_m, env.config.car_length_m
+            )
+        self.assertTrue(slowed)
+
 
 class LaneChangeTests(unittest.TestCase):
     def make_env(self, max_steps: int = 2000) -> DrivingEnv:
