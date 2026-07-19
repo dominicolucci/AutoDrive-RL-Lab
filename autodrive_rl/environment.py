@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from .config import EnvConfig
+from .config import EnvConfig, ScenarioSpec
 
 
 class Action(IntEnum):
@@ -34,15 +34,26 @@ ACTION_NAMES = {
     Action.STEER_RIGHT: "steer right",
 }
 
+OBSTACLE_WINDOW_M = 30.0
+OBSTACLE_EGO_CLEAR_M = 60.0
+
 
 @dataclass
 class TrafficCar:
-    """A traffic car represented relative to the ego car."""
+    """A traffic car (or static obstacle) represented relative to the ego car."""
 
     lane: int
     y_m: float
     speed_mps: float
     color_index: int = 0
+    behavior: str = "cruiser"  # "cruiser" | "reactive" | "obstacle"
+    cruise_speed_mps: float | None = None
+    target_lane: int | None = None
+    lane_change_progress: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.cruise_speed_mps is None:
+            self.cruise_speed_mps = self.speed_mps
 
 
 class DrivingEnv:
@@ -62,6 +73,7 @@ class DrivingEnv:
         *,
         scenario: str = "traffic",
         seed: int | None = None,
+        scenario_spec: ScenarioSpec | None = None,
     ) -> None:
         if scenario not in {"lane", "traffic"}:
             raise ValueError("scenario must be 'lane' or 'traffic'")
@@ -76,6 +88,7 @@ class DrivingEnv:
         self.steps = 0
         self.previous_action = Action.MAINTAIN
         self.last_reward_terms: dict[str, float] = {}
+        self.scenario_spec = scenario_spec
         self.reset(seed=seed)
 
     @property
@@ -307,8 +320,11 @@ class DrivingEnv:
 
     def _spawn_initial_traffic(self) -> None:
         cfg = self.config
+        spec = self.scenario_spec
+        count = cfg.traffic_count if spec is None else spec.traffic_count
+        reactive_fraction = 0.0 if spec is None else spec.reactive_fraction
         attempts = 0
-        while len(self.traffic) < cfg.traffic_count and attempts < 500:
+        while len(self.traffic) < count and attempts < 500:
             attempts += 1
             lane = int(self.rng.integers(0, cfg.lane_count))
             y_m = float(self.rng.uniform(22.0, cfg.sensor_range_m + 55.0))
@@ -316,7 +332,40 @@ class DrivingEnv:
                 continue
             speed = float(self.rng.uniform(9.0, 26.0))
             color_index = int(self.rng.integers(0, 6))
-            self.traffic.append(TrafficCar(lane, y_m, speed, color_index))
+            behavior = "cruiser"
+            if reactive_fraction > 0.0 and self.rng.random() < reactive_fraction:
+                behavior = "reactive"
+            self.traffic.append(TrafficCar(lane, y_m, speed, color_index, behavior=behavior))
+        self._spawn_obstacles()
+
+    def _spawn_obstacles(self) -> None:
+        spec = self.scenario_spec
+        if spec is None or spec.obstacle_count == 0:
+            return
+        cfg = self.config
+        ego_lane = self.current_lane
+        placed = 0
+        attempts = 0
+        while placed < spec.obstacle_count and attempts < 200:
+            attempts += 1
+            lane = int(self.rng.integers(0, cfg.lane_count))
+            y_m = float(self.rng.uniform(30.0, cfg.sensor_range_m + 55.0))
+            if lane == ego_lane and y_m < OBSTACLE_EGO_CLEAR_M:
+                continue
+            if not self._obstacle_position_ok(lane, y_m):
+                continue
+            self.traffic.append(TrafficCar(lane, y_m, 0.0, behavior="obstacle"))
+            placed += 1
+
+    def _obstacle_position_ok(self, lane: int, y_m: float) -> bool:
+        cfg = self.config
+        blocked = {lane}
+        for car in self.traffic:
+            if car.lane == lane and abs(car.y_m - y_m) < 24.0:
+                return False
+            if car.behavior == "obstacle" and abs(car.y_m - y_m) < OBSTACLE_WINDOW_M:
+                blocked.add(car.lane)
+        return len(blocked) < cfg.lane_count
 
     def _recycle_traffic(self) -> None:
         if self.scenario != "traffic":
