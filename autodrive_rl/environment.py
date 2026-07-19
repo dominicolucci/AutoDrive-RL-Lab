@@ -42,6 +42,11 @@ REACTIVE_BRAKE_MPS2 = 4.0
 REACTIVE_ACCEL_MPS2 = 2.0
 REACTIVE_MIN_GAP_M = 2.0
 
+LANE_CHANGE_DURATION_S = 1.2
+LANE_CHANGE_PROBABILITY = 0.005
+LANE_CHANGE_MIN_FRONT_GAP_M = 15.0
+LANE_CHANGE_MIN_REAR_GAP_M = 12.0
+
 
 @dataclass
 class TrafficCar:
@@ -413,9 +418,16 @@ class DrivingEnv:
         return max(scores)[1]
 
     def _update_traffic(self) -> None:
+        cfg = self.config
         for car in self.traffic:
             if car.behavior == "reactive":
                 self._update_reactive(car)
+            if car.target_lane is not None:
+                car.lane_change_progress += cfg.dt_seconds / LANE_CHANGE_DURATION_S
+                if car.lane_change_progress >= 1.0:
+                    car.lane = car.target_lane
+                    car.target_lane = None
+                    car.lane_change_progress = 0.0
 
     def _update_reactive(self, car: TrafficCar) -> None:
         cfg = self.config
@@ -437,6 +449,12 @@ class DrivingEnv:
                 car.cruise_speed_mps,
                 car.speed_mps + REACTIVE_ACCEL_MPS2 * cfg.dt_seconds,
             )
+        if (
+            car.target_lane is None
+            and car.speed_mps < 0.8 * car.cruise_speed_mps
+            and self.rng.random() < LANE_CHANGE_PROBABILITY
+        ):
+            self._maybe_start_lane_change(car, lane)
 
     def _front_gap_for(self, car: TrafficCar, lane: int) -> tuple[float, float]:
         """Gap to the nearest leader in a lane, plus that leader's speed."""
@@ -458,6 +476,38 @@ class DrivingEnv:
                 gap = candidate
                 leader_speed = self.ego_speed_mps
         return max(0.0, gap), leader_speed
+
+    def _maybe_start_lane_change(self, car: TrafficCar, lane: int) -> None:
+        current_gap, _ = self._front_gap_for(car, lane)
+        candidates = [c for c in (lane - 1, lane + 1) if 0 <= c < self.config.lane_count]
+        if len(candidates) == 2 and self.rng.random() < 0.5:
+            candidates.reverse()
+        for candidate in candidates:
+            if self._lane_change_ok(car, candidate, current_gap):
+                car.target_lane = candidate
+                car.lane_change_progress = 0.0
+                return
+
+    def _lane_change_ok(self, car: TrafficCar, candidate: int, current_gap: float) -> bool:
+        front_gap, _ = self._front_gap_for(car, candidate)
+        rear_gap = self._rear_gap_for(car, candidate)
+        return (
+            front_gap > current_gap
+            and front_gap >= LANE_CHANGE_MIN_FRONT_GAP_M
+            and rear_gap >= LANE_CHANGE_MIN_REAR_GAP_M
+        )
+
+    def _rear_gap_for(self, car: TrafficCar, lane: int) -> float:
+        cfg = self.config
+        gap = float("inf")
+        for other in self.traffic:
+            if other is car:
+                continue
+            if self.traffic_lane(other) == lane and other.y_m < car.y_m:
+                gap = min(gap, car.y_m - other.y_m - cfg.car_length_m)
+        if lane == self.current_lane and car.y_m > 0.0:
+            gap = min(gap, car.y_m - cfg.car_length_m)
+        return max(0.0, gap)
 
     def _has_collision(self) -> bool:
         cfg = self.config
