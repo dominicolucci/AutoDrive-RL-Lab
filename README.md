@@ -113,6 +113,26 @@ The heuristic is not reinforcement learning. It is a useful upper baseline:
 if the DQN improves beyond random driving and approaches the heuristic, the
 training experiment is moving in the right direction.
 
+## Vary the world
+
+Scenario presets control traffic density, static obstacles, and how many
+drivers react (brake on short headway, change lanes when blocked):
+
+```bash
+python -m autodrive_rl.play --policy heuristic --scenario-preset dense
+python -m autodrive_rl.play --policy dqn --model models/autodrive_dqn_best.npz --scenario-preset sparse
+```
+
+Presets: `sparse` (4 cars), `normal` (today's 9-car world), `dense`
+(14 cars, 2 obstacles, half the drivers reactive), `random`. Override any
+field with `--traffic N`, `--obstacles N`, or `--reactive F` (0 to 1).
+
+Training now uses domain randomization by default: after the warm-up
+curriculum, every episode rolls fresh conditions from the `random` ranges,
+and periodic evaluations run a sparse/normal/dense matrix. The best
+checkpoint is the one with the highest mean return across that matrix. Use
+`--scenario-preset normal` to reproduce the old fixed-world training.
+
 ## The learning loop
 
 ```mermaid
