@@ -182,5 +182,59 @@ class ReactiveBrakingTests(unittest.TestCase):
         self.assertEqual(car.speed_mps, 15.0)
 
 
+class LaneChangeTests(unittest.TestCase):
+    def make_env(self, max_steps: int = 2000) -> DrivingEnv:
+        config = replace(EnvConfig(), max_steps=max_steps)
+        return DrivingEnv(config, scenario="lane", seed=6)
+
+    def test_lane_change_rejects_occupied_lane(self) -> None:
+        env = self.make_env()
+        car = TrafficCar(0, 50.0, 10.0, behavior="reactive", cruise_speed_mps=25.0)
+        blocker = TrafficCar(1, 55.0, 10.0)
+        env.traffic = [car, blocker]
+        current_gap, _ = env._front_gap_for(car, 0)
+        self.assertFalse(env._lane_change_ok(car, 1, current_gap))
+
+    def test_lane_change_accepts_clear_lane(self) -> None:
+        env = self.make_env()
+        leader = TrafficCar(0, 60.0, 0.0, behavior="obstacle")
+        car = TrafficCar(0, 50.0, 10.0, behavior="reactive", cruise_speed_mps=25.0)
+        env.traffic = [leader, car]
+        current_gap, _ = env._front_gap_for(car, 0)
+        self.assertTrue(env._lane_change_ok(car, 1, current_gap))
+
+    def test_rear_gap_check_includes_ego(self) -> None:
+        env = self.make_env()
+        ego_lane = env.current_lane
+        car = TrafficCar(ego_lane - 1, 8.0, 10.0, behavior="reactive", cruise_speed_mps=25.0)
+        env.traffic = [car]
+        self.assertLess(env._rear_gap_for(car, ego_lane), 12.0)
+        current_gap, _ = env._front_gap_for(car, ego_lane - 1)
+        self.assertFalse(env._lane_change_ok(car, ego_lane, current_gap))
+
+    def test_lane_change_animates_then_completes(self) -> None:
+        env = self.make_env()
+        car = TrafficCar(0, 50.0, 15.0, target_lane=1)
+        env.traffic = [car]
+        env.step(Action.MAINTAIN)
+        self.assertIsNotNone(car.target_lane)
+        self.assertGreater(car.lane_change_progress, 0.0)
+        for _ in range(15):
+            env.step(Action.MAINTAIN)
+        self.assertEqual(car.lane, 1)
+        self.assertIsNone(car.target_lane)
+
+    def test_blocked_reactive_car_eventually_changes_lane(self) -> None:
+        env = self.make_env()
+        leader = TrafficCar(0, 90.0, 0.0, behavior="obstacle")
+        car = TrafficCar(0, 30.0, 18.0, behavior="reactive", cruise_speed_mps=24.0)
+        env.traffic = [leader, car]
+        for _ in range(1500):
+            env.step(Action.MAINTAIN)
+            if env.traffic_lane(car) != 0:
+                break
+        self.assertNotEqual(env.traffic_lane(car), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
