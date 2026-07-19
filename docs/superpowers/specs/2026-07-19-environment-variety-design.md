@@ -35,9 +35,13 @@ changes: `target_lane: int` and `lane_change_progress: float` (0..1), and a
 Per step, a reactive car:
 
 - **Time-headway braking:** find the nearest thing ahead in its lane
-  (traffic, obstacle, or the ego car). If gap < 1.5 s x current speed,
-  decelerate up to 4.0 m/s^2; otherwise accelerate up to 2.0 m/s^2 back
-  toward `cruise_speed_mps`. Cruisers keep today's constant-speed behavior.
+  (traffic, obstacle, or the ego car). Brake (up to 4.0 m/s^2) when
+  gap < 1.5 s x current speed + closing_speed^2 / (2 x 4.0 m/s^2); otherwise
+  accelerate up to 2.0 m/s^2 back toward `cruise_speed_mps`. The second
+  term is the stopping distance at the current closing speed — a pure
+  headway rule brakes too late against stopped obstacles (at 22 m/s it
+  would trigger 33 m out but stopping takes ~60 m). Cruisers keep today's
+  constant-speed behavior.
 - **Lane changes:** eligible only when held below 80% of cruise speed. With
   a per-step probability of 0.5%, evaluate adjacent lanes: candidate
   must have a larger front gap than the current lane and safe front/rear
