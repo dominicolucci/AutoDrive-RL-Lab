@@ -38,11 +38,11 @@ Per step, a reactive car:
   (traffic, obstacle, or the ego car). If gap < 1.5 s x current speed,
   decelerate up to 4.0 m/s^2; otherwise accelerate up to 2.0 m/s^2 back
   toward `cruise_speed_mps`. Cruisers keep today's constant-speed behavior.
-- **Lane changes:** eligible only when held below ~80% of cruise speed. With
-  a small per-step probability (~0.5%), evaluate adjacent lanes: candidate
+- **Lane changes:** eligible only when held below 80% of cruise speed. With
+  a per-step probability of 0.5%, evaluate adjacent lanes: candidate
   must have a larger front gap than the current lane and safe front/rear
   clearance (rear clearance check includes the ego car). If accepted, begin a
-  lane change that animates linearly over ~1.2 s. A car mid-change uses its
+  lane change that animates linearly over 1.2 s. A car mid-change uses its
   interpolated x for both collision detection and sensor lane attribution
   (nearest lane to actual x).
 - Collision detection between the ego and traffic switches from
