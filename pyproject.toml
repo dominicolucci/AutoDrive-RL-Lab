@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autodrive-rl"
+version = "0.1.0"
+description = "An educational autonomous-driving simulation with a from-scratch DQN agent"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26,<3"]
+
+[project.scripts]
+autodrive-play = "autodrive_rl.play:main"
+autodrive-train = "autodrive_rl.train:main"
+
+[tool.setuptools.packages.find]
+include = ["autodrive_rl*"]
+

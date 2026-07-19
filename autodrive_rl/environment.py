@@ -1,0 +1,372 @@
+"""A compact, Gym-style three-lane highway environment.
+
+The environment intentionally uses numerical sensors instead of camera pixels.
+That keeps the first project focused on the reinforcement-learning loop: state,
+action, transition, reward, replay, and policy improvement.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import IntEnum
+from typing import Any
+
+import numpy as np
+
+from .config import EnvConfig
+
+
+class Action(IntEnum):
+    """The five discrete controls available to the learning agent."""
+
+    MAINTAIN = 0
+    ACCELERATE = 1
+    BRAKE = 2
+    STEER_LEFT = 3
+    STEER_RIGHT = 4
+
+
+ACTION_NAMES = {
+    Action.MAINTAIN: "maintain",
+    Action.ACCELERATE: "accelerate",
+    Action.BRAKE: "brake",
+    Action.STEER_LEFT: "steer left",
+    Action.STEER_RIGHT: "steer right",
+}
+
+
+@dataclass
+class TrafficCar:
+    """A traffic car represented relative to the ego car."""
+
+    lane: int
+    y_m: float
+    speed_mps: float
+    color_index: int = 0
+
+
+class DrivingEnv:
+    """Straight-highway RL environment with moving traffic.
+
+    ``reset`` and ``step`` follow Gymnasium's return convention, but Gymnasium
+    itself is not required. This makes the learning loop easy to inspect and
+    lets the MVP run with only NumPy installed.
+    """
+
+    observation_size = 16
+    action_size = len(Action)
+
+    def __init__(
+        self,
+        config: EnvConfig | None = None,
+        *,
+        scenario: str = "traffic",
+        seed: int | None = None,
+    ) -> None:
+        if scenario not in {"lane", "traffic"}:
+            raise ValueError("scenario must be 'lane' or 'traffic'")
+        self.config = config or EnvConfig()
+        self.scenario = scenario
+        self.rng = np.random.default_rng(seed)
+        self.traffic: list[TrafficCar] = []
+        self.ego_x_m = 0.0
+        self.ego_lateral_speed_mps = 0.0
+        self.ego_speed_mps = 0.0
+        self.distance_m = 0.0
+        self.steps = 0
+        self.previous_action = Action.MAINTAIN
+        self.last_reward_terms: dict[str, float] = {}
+        self.reset(seed=seed)
+
+    @property
+    def lane_centers_m(self) -> np.ndarray:
+        cfg = self.config
+        leftmost = -cfg.road_half_width_m + cfg.lane_width_m / 2.0
+        return leftmost + np.arange(cfg.lane_count) * cfg.lane_width_m
+
+    @property
+    def current_lane(self) -> int:
+        return int(np.argmin(np.abs(self.lane_centers_m - self.ego_x_m)))
+
+    def lane_center(self, lane: int) -> float:
+        if not 0 <= lane < self.config.lane_count:
+            raise ValueError(f"invalid lane {lane}")
+        return float(self.lane_centers_m[lane])
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        del options
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+
+        self.ego_x_m = self.lane_center(self.config.lane_count // 2)
+        self.ego_lateral_speed_mps = 0.0
+        self.ego_speed_mps = 12.0
+        self.distance_m = 0.0
+        self.steps = 0
+        self.previous_action = Action.MAINTAIN
+        self.last_reward_terms = {}
+        self.traffic = []
+        if self.scenario == "traffic":
+            self._spawn_initial_traffic()
+
+        observation = self._observation()
+        return observation, self._info(collision=False, off_road=False)
+
+    def step(
+        self, action: int | Action
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        try:
+            action = Action(int(action))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"action must be an integer from 0 to {self.action_size - 1}") from exc
+
+        cfg = self.config
+        acceleration = 0.0
+        target_lateral_speed = 0.0
+
+        if action == Action.ACCELERATE:
+            acceleration = cfg.acceleration_mps2
+        elif action == Action.BRAKE:
+            acceleration = -cfg.braking_mps2
+        elif action == Action.STEER_LEFT:
+            target_lateral_speed = -cfg.max_lateral_speed_mps
+        elif action == Action.STEER_RIGHT:
+            target_lateral_speed = cfg.max_lateral_speed_mps
+
+        acceleration -= cfg.rolling_drag_mps2
+        self.ego_speed_mps = float(
+            np.clip(
+                self.ego_speed_mps + acceleration * cfg.dt_seconds,
+                0.0,
+                cfg.max_speed_mps,
+            )
+        )
+
+        steering_alpha = min(1.0, cfg.steering_response * cfg.dt_seconds)
+        self.ego_lateral_speed_mps += steering_alpha * (
+            target_lateral_speed - self.ego_lateral_speed_mps
+        )
+        self.ego_x_m += self.ego_lateral_speed_mps * cfg.dt_seconds
+
+        forward_step = self.ego_speed_mps * cfg.dt_seconds
+        self.distance_m += forward_step
+        for car in self.traffic:
+            car.y_m += (car.speed_mps - self.ego_speed_mps) * cfg.dt_seconds
+        self._recycle_traffic()
+
+        self.steps += 1
+        collision = self._has_collision()
+        off_road = self._is_off_road()
+        terminated = collision or off_road
+        truncated = self.steps >= cfg.max_steps
+
+        reward = self._reward(
+            action=action,
+            forward_step=forward_step,
+            collision=collision,
+            off_road=off_road,
+        )
+        self.previous_action = action
+        observation = self._observation()
+        return observation, reward, terminated, truncated, self._info(collision, off_road)
+
+    def sensor_snapshot(self) -> dict[str, np.ndarray | float | int]:
+        """Return human-readable sensor values in meters and meters/second."""
+
+        cfg = self.config
+        front_gaps = np.full(cfg.lane_count, cfg.sensor_range_m, dtype=np.float32)
+        rear_gaps = np.full(cfg.lane_count, cfg.sensor_range_m, dtype=np.float32)
+        front_relative = np.zeros(cfg.lane_count, dtype=np.float32)
+        rear_relative = np.zeros(cfg.lane_count, dtype=np.float32)
+
+        half_length = cfg.car_length_m
+        for car in self.traffic:
+            if car.y_m >= 0.0:
+                gap = max(0.0, car.y_m - half_length)
+                if gap < front_gaps[car.lane] and gap <= cfg.sensor_range_m:
+                    front_gaps[car.lane] = gap
+                    front_relative[car.lane] = car.speed_mps - self.ego_speed_mps
+            else:
+                gap = max(0.0, -car.y_m - half_length)
+                if gap < rear_gaps[car.lane] and gap <= cfg.sensor_range_m:
+                    rear_gaps[car.lane] = gap
+                    rear_relative[car.lane] = car.speed_mps - self.ego_speed_mps
+
+        lane = self.current_lane
+        lane_offset = self.ego_x_m - self.lane_center(lane)
+        return {
+            "front_gaps_m": front_gaps,
+            "rear_gaps_m": rear_gaps,
+            "front_relative_speeds_mps": front_relative,
+            "rear_relative_speeds_mps": rear_relative,
+            "lane": lane,
+            "lane_offset_m": float(lane_offset),
+        }
+
+    def _observation(self) -> np.ndarray:
+        cfg = self.config
+        sensors = self.sensor_snapshot()
+        safe_center_limit = cfg.road_half_width_m - cfg.car_width_m / 2.0
+        lane_offset_scale = cfg.lane_width_m / 2.0
+
+        observation = np.concatenate(
+            [
+                np.array(
+                    [
+                        self.ego_x_m / safe_center_limit,
+                        self.ego_lateral_speed_mps / cfg.max_lateral_speed_mps,
+                        self.ego_speed_mps / cfg.max_speed_mps,
+                        float(sensors["lane_offset_m"]) / lane_offset_scale,
+                    ],
+                    dtype=np.float32,
+                ),
+                np.asarray(sensors["front_gaps_m"], dtype=np.float32) / cfg.sensor_range_m,
+                np.asarray(sensors["rear_gaps_m"], dtype=np.float32) / cfg.sensor_range_m,
+                np.asarray(sensors["front_relative_speeds_mps"], dtype=np.float32)
+                / cfg.max_speed_mps,
+                np.asarray(sensors["rear_relative_speeds_mps"], dtype=np.float32)
+                / cfg.max_speed_mps,
+            ]
+        )
+        return np.clip(observation, -1.0, 1.0).astype(np.float32)
+
+    def _reward(
+        self,
+        *,
+        action: Action,
+        forward_step: float,
+        collision: bool,
+        off_road: bool,
+    ) -> float:
+        cfg = self.config
+        sensors = self.sensor_snapshot()
+        lane_offset = abs(float(sensors["lane_offset_m"]))
+        center_score = max(0.0, 1.0 - lane_offset / (cfg.lane_width_m / 2.0))
+
+        progress = forward_step / (cfg.max_speed_mps * cfg.dt_seconds)
+        speed = 0.20 * min(self.ego_speed_mps / cfg.target_speed_mps, 1.0)
+        # Centering is useful only while moving. Without this gate, a stopped
+        # car could earn positive reward forever simply by sitting in a lane.
+        movement_fraction = min(self.ego_speed_mps / 6.0, 1.0)
+        lane_centering = 0.12 * center_score * movement_fraction
+        living_cost = -0.04
+
+        current_gap = float(np.asarray(sensors["front_gaps_m"])[self.current_lane])
+        current_relative_speed = float(
+            np.asarray(sensors["front_relative_speeds_mps"])[self.current_lane]
+        )
+        desired_gap = max(10.0, 1.25 * self.ego_speed_mps)
+        unsafe_following = 0.0
+        if current_gap < desired_gap:
+            unsafe_following = -2.0 * (1.0 - current_gap / desired_gap)
+        closing_speed = max(0.0, -current_relative_speed)
+        if closing_speed > 0.1:
+            time_to_collision = current_gap / closing_speed
+            if time_to_collision < 4.0:
+                unsafe_following += -2.0 * (1.0 - time_to_collision / 4.0)
+
+        control_cost = -0.015 if action in {Action.STEER_LEFT, Action.STEER_RIGHT} else 0.0
+        unsafe_lane_change = 0.0
+        if action in {Action.STEER_LEFT, Action.STEER_RIGHT}:
+            direction = -1 if action == Action.STEER_LEFT else 1
+            target_lane = self.current_lane + direction
+            if not 0 <= target_lane < cfg.lane_count:
+                unsafe_lane_change = -2.5
+            else:
+                target_front = float(np.asarray(sensors["front_gaps_m"])[target_lane])
+                target_rear = float(np.asarray(sensors["rear_gaps_m"])[target_lane])
+                front_risk = max(0.0, 1.0 - target_front / 14.0)
+                rear_risk = max(0.0, 1.0 - target_rear / 12.0)
+                unsafe_lane_change = -2.0 * max(front_risk, rear_risk)
+
+        safe_center_limit = cfg.road_half_width_m - cfg.car_width_m / 2.0
+        edge_fraction = abs(self.ego_x_m) / safe_center_limit
+        road_edge = 0.0
+        if edge_fraction > 0.82:
+            road_edge = -2.0 * min(1.0, (edge_fraction - 0.82) / 0.18)
+
+        terminal = -500.0 if collision else (-350.0 if off_road else 0.0)
+
+        self.last_reward_terms = {
+            "progress": progress,
+            "speed": speed,
+            "lane_centering": lane_centering,
+            "unsafe_following": unsafe_following,
+            "unsafe_lane_change": unsafe_lane_change,
+            "road_edge": road_edge,
+            "control_cost": control_cost,
+            "living_cost": living_cost,
+            "terminal": terminal,
+        }
+        return float(sum(self.last_reward_terms.values()))
+
+    def _spawn_initial_traffic(self) -> None:
+        cfg = self.config
+        attempts = 0
+        while len(self.traffic) < cfg.traffic_count and attempts < 500:
+            attempts += 1
+            lane = int(self.rng.integers(0, cfg.lane_count))
+            y_m = float(self.rng.uniform(22.0, cfg.sensor_range_m + 55.0))
+            if any(car.lane == lane and abs(car.y_m - y_m) < 24.0 for car in self.traffic):
+                continue
+            speed = float(self.rng.uniform(9.0, 26.0))
+            color_index = int(self.rng.integers(0, 6))
+            self.traffic.append(TrafficCar(lane, y_m, speed, color_index))
+
+    def _recycle_traffic(self) -> None:
+        if self.scenario != "traffic":
+            return
+        cfg = self.config
+        for car in self.traffic:
+            if -45.0 <= car.y_m <= cfg.sensor_range_m + 90.0:
+                continue
+            car.lane = self._least_crowded_spawn_lane()
+            car.y_m = float(self.rng.uniform(cfg.sensor_range_m + 20.0, cfg.sensor_range_m + 80.0))
+            car.speed_mps = float(self.rng.uniform(9.0, 26.0))
+            car.color_index = int(self.rng.integers(0, 6))
+
+    def _least_crowded_spawn_lane(self) -> int:
+        cfg = self.config
+        scores: list[tuple[float, int]] = []
+        spawn_y = cfg.sensor_range_m + 45.0
+        for lane in range(cfg.lane_count):
+            nearest = min(
+                (abs(car.y_m - spawn_y) for car in self.traffic if car.lane == lane),
+                default=999.0,
+            )
+            scores.append((nearest + float(self.rng.uniform(0.0, 3.0)), lane))
+        return max(scores)[1]
+
+    def _has_collision(self) -> bool:
+        cfg = self.config
+        for car in self.traffic:
+            car_x = self.lane_center(car.lane)
+            longitudinal_overlap = abs(car.y_m) < cfg.car_length_m
+            lateral_overlap = abs(car_x - self.ego_x_m) < cfg.car_width_m
+            if longitudinal_overlap and lateral_overlap:
+                return True
+        return False
+
+    def _is_off_road(self) -> bool:
+        return (
+            abs(self.ego_x_m) + self.config.car_width_m / 2.0
+            > self.config.road_half_width_m
+        )
+
+    def _info(self, collision: bool, off_road: bool) -> dict[str, Any]:
+        return {
+            "collision": collision,
+            "off_road": off_road,
+            "distance_m": self.distance_m,
+            "speed_mps": self.ego_speed_mps,
+            "speed_mph": self.ego_speed_mps * 2.236936,
+            "lane": self.current_lane,
+            "steps": self.steps,
+            "action": ACTION_NAMES[self.previous_action],
+            "reward_terms": self.last_reward_terms.copy(),
+        }
