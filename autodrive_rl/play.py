@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
+
+from .config import resolve_scenario
 from .dqn import DQNAgent
 from .environment import Action, DrivingEnv
 from .heuristic import HeuristicDriver
@@ -26,6 +29,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="saved .npz model used by --policy dqn",
     )
     parser.add_argument("--scenario", choices=("lane", "traffic"), default="traffic")
+    parser.add_argument(
+        "--scenario-preset",
+        choices=("sparse", "normal", "dense", "random"),
+        default="normal",
+        help="world conditions to drive in (default: normal, today's world)",
+    )
+    parser.add_argument("--traffic", type=int, default=None, help="override car count")
+    parser.add_argument("--obstacles", type=int, default=None, help="override obstacle count")
+    parser.add_argument("--reactive", type=float, default=None, help="override reactive fraction 0..1")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--fps", type=int, default=30)
     return parser
@@ -33,7 +45,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    env = DrivingEnv(scenario=args.scenario, seed=args.seed)
+    scenario_spec = resolve_scenario(
+        args.scenario_preset,
+        traffic=args.traffic,
+        obstacles=args.obstacles,
+        reactive=args.reactive,
+        rng=np.random.default_rng(args.seed),
+    )
+    env = DrivingEnv(scenario=args.scenario, seed=args.seed, scenario_spec=scenario_spec)
     renderer = TopDownRenderer(fps=args.fps)
     heuristic = HeuristicDriver()
     agent: DQNAgent | None = None

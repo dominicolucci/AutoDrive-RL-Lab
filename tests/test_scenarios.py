@@ -17,6 +17,7 @@ from autodrive_rl.config import (
 )
 from autodrive_rl.dqn import DQNAgent
 from autodrive_rl.environment import Action, DrivingEnv, TrafficCar
+from autodrive_rl.play import build_parser as build_play_parser
 from autodrive_rl.train import build_parser, train
 
 
@@ -355,6 +356,17 @@ class MatrixEvaluationTests(unittest.TestCase):
         self.assertAlmostEqual(float(final["eval_return"]), mean_return, places=3)
         first = records[0]
         self.assertEqual(first["eval_sparse_return"], "")
+
+
+class PlayParserTests(unittest.TestCase):
+    def test_play_parser_scenario_flags(self) -> None:
+        args = build_play_parser().parse_args([])
+        self.assertEqual(args.scenario_preset, "normal")
+        args = build_play_parser().parse_args(
+            ["--scenario-preset", "dense", "--obstacles", "3"]
+        )
+        self.assertEqual(args.scenario_preset, "dense")
+        self.assertEqual(args.obstacles, 3)
 
 
 if __name__ == "__main__":
