@@ -13,7 +13,7 @@ from autodrive_rl.config import (
     resolve_scenario,
     sample_scenario,
 )
-from autodrive_rl.environment import DrivingEnv, TrafficCar
+from autodrive_rl.environment import Action, DrivingEnv, TrafficCar
 
 
 class ScenarioSpecTests(unittest.TestCase):
@@ -143,6 +143,43 @@ class LaneAttributionTests(unittest.TestCase):
         sensors = env.sensor_snapshot()
         front = np.asarray(sensors["front_gaps_m"])
         self.assertLess(front[ego_lane], env.config.sensor_range_m)
+
+
+class ReactiveBrakingTests(unittest.TestCase):
+    def make_env(self, max_steps: int = 400) -> DrivingEnv:
+        config = replace(EnvConfig(), max_steps=max_steps)
+        return DrivingEnv(config, scenario="lane", seed=2)
+
+    def test_reactive_car_never_hits_obstacle(self) -> None:
+        env = self.make_env()
+        leader = TrafficCar(0, 80.0, 0.0, behavior="obstacle")
+        follower = TrafficCar(0, 20.0, 15.0, behavior="reactive")
+        env.traffic = [leader, follower]
+        slowed = False
+        for _ in range(300):
+            env.step(Action.MAINTAIN)
+            if follower.speed_mps < 14.0:
+                slowed = True
+            self.assertGreaterEqual(
+                leader.y_m - follower.y_m, env.config.car_length_m
+            )
+        self.assertTrue(slowed)
+
+    def test_reactive_car_recovers_toward_cruise_speed(self) -> None:
+        env = self.make_env()
+        car = TrafficCar(0, 60.0, 8.0, behavior="reactive", cruise_speed_mps=20.0)
+        env.traffic = [car]
+        for _ in range(200):
+            env.step(Action.MAINTAIN)
+        self.assertGreater(car.speed_mps, 18.0)
+
+    def test_cruiser_behavior_is_unchanged(self) -> None:
+        env = self.make_env()
+        car = TrafficCar(0, 60.0, 15.0, behavior="cruiser")
+        env.traffic = [car]
+        for _ in range(50):
+            env.step(Action.MAINTAIN)
+        self.assertEqual(car.speed_mps, 15.0)
 
 
 if __name__ == "__main__":
