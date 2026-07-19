@@ -400,10 +400,24 @@ class DrivingEnv:
         for car in self.traffic:
             if -45.0 <= car.y_m <= cfg.sensor_range_m + 90.0:
                 continue
+            if car.behavior == "obstacle":
+                for _ in range(50):
+                    lane = int(self.rng.integers(0, cfg.lane_count))
+                    y_m = float(
+                        self.rng.uniform(cfg.sensor_range_m + 20.0, cfg.sensor_range_m + 80.0)
+                    )
+                    if self._obstacle_position_ok(lane, y_m):
+                        car.lane = lane
+                        car.y_m = y_m
+                        break
+                continue
             car.lane = self._least_crowded_spawn_lane()
             car.y_m = float(self.rng.uniform(cfg.sensor_range_m + 20.0, cfg.sensor_range_m + 80.0))
             car.speed_mps = float(self.rng.uniform(9.0, 26.0))
             car.color_index = int(self.rng.integers(0, 6))
+            car.cruise_speed_mps = car.speed_mps
+            car.target_lane = None
+            car.lane_change_progress = 0.0
 
     def _least_crowded_spawn_lane(self) -> int:
         cfg = self.config

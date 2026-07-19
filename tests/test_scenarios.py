@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 
@@ -13,6 +14,7 @@ from autodrive_rl.config import (
     resolve_scenario,
     sample_scenario,
 )
+from autodrive_rl.dqn import DQNAgent
 from autodrive_rl.environment import Action, DrivingEnv, TrafficCar
 
 
@@ -238,6 +240,44 @@ class LaneChangeTests(unittest.TestCase):
             if env.traffic_lane(car) != 0:
                 break
         self.assertNotEqual(env.traffic_lane(car), 0)
+
+
+class ObstacleLifecycleTests(unittest.TestCase):
+    def test_obstacles_never_move_and_recycle_ahead(self) -> None:
+        config = replace(EnvConfig(), max_steps=900)
+        spec = ScenarioSpec(traffic_count=0, obstacle_count=2)
+        env = DrivingEnv(config, scenario="traffic", seed=9, scenario_spec=spec)
+        for _ in range(600):
+            before = {id(car): car.y_m for car in env.traffic}
+            env.step(Action.ACCELERATE)
+            for car in env.traffic:
+                self.assertEqual(car.behavior, "obstacle")
+                self.assertEqual(car.speed_mps, 0.0)
+                moved = car.y_m - before[id(car)]
+                recycled = moved > env.config.sensor_range_m / 2.0
+                drifted_back = moved < 0.0
+                self.assertTrue(recycled or drifted_back)
+        self.assertEqual(
+            sum(1 for car in env.traffic if car.behavior == "obstacle"), 2
+        )
+
+
+class CheckpointCompatibilityTests(unittest.TestCase):
+    def test_old_checkpoint_drives_in_new_environment(self) -> None:
+        path = Path("models/autodrive_dqn_best.npz")
+        if not path.exists():
+            self.skipTest("no shipped checkpoint available")
+        agent = DQNAgent.load(path)
+        config = replace(EnvConfig(), max_steps=100)
+        spec = ScenarioSpec(traffic_count=14, obstacle_count=2, reactive_fraction=0.5)
+        env = DrivingEnv(config, scenario="traffic", seed=12, scenario_spec=spec)
+        observation, _ = env.reset(seed=12)
+        for _ in range(50):
+            action = agent.act(observation, explore=False)
+            self.assertIn(action, range(env.action_size))
+            observation, _, terminated, truncated, _ = env.step(action)
+            if terminated or truncated:
+                break
 
 
 if __name__ == "__main__":
