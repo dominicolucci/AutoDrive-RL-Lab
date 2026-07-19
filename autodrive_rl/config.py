@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class EnvConfig:
@@ -50,3 +52,75 @@ class DQNConfig:
     epsilon_decay_steps: int = 90_000
     gradient_clip_norm: float = 10.0
 
+
+@dataclass(frozen=True)
+class ScenarioSpec:
+    """Concrete per-episode world conditions."""
+
+    traffic_count: int = 9
+    obstacle_count: int = 0
+    reactive_fraction: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.traffic_count < 0:
+            raise ValueError("traffic_count must be >= 0")
+        if self.obstacle_count < 0:
+            raise ValueError("obstacle_count must be >= 0")
+        if not 0.0 <= self.reactive_fraction <= 1.0:
+            raise ValueError("reactive_fraction must be in [0, 1]")
+
+
+@dataclass(frozen=True)
+class ScenarioRanges:
+    """Inclusive sampling bounds for domain randomization."""
+
+    traffic_count: tuple[int, int] = (4, 14)
+    obstacle_count: tuple[int, int] = (0, 3)
+    reactive_fraction: tuple[float, float] = (0.0, 1.0)
+
+
+SCENARIO_PRESETS: dict[str, ScenarioSpec] = {
+    "sparse": ScenarioSpec(traffic_count=4, obstacle_count=0, reactive_fraction=0.0),
+    "normal": ScenarioSpec(traffic_count=9, obstacle_count=0, reactive_fraction=0.0),
+    "dense": ScenarioSpec(traffic_count=14, obstacle_count=2, reactive_fraction=0.5),
+}
+
+
+def sample_scenario(ranges: ScenarioRanges, rng: np.random.Generator) -> ScenarioSpec:
+    """Roll one episode's conditions from the given inclusive bounds."""
+
+    return ScenarioSpec(
+        traffic_count=int(
+            rng.integers(ranges.traffic_count[0], ranges.traffic_count[1] + 1)
+        ),
+        obstacle_count=int(
+            rng.integers(ranges.obstacle_count[0], ranges.obstacle_count[1] + 1)
+        ),
+        reactive_fraction=float(rng.uniform(*ranges.reactive_fraction)),
+    )
+
+
+def resolve_scenario(
+    preset: str,
+    *,
+    traffic: int | None = None,
+    obstacles: int | None = None,
+    reactive: float | None = None,
+    rng: np.random.Generator | None = None,
+    ranges: ScenarioRanges | None = None,
+) -> ScenarioSpec:
+    """Turn a preset name plus optional overrides into a concrete spec."""
+
+    if preset == "random":
+        if rng is None:
+            raise ValueError("preset 'random' requires an rng")
+        base = sample_scenario(ranges or ScenarioRanges(), rng)
+    elif preset in SCENARIO_PRESETS:
+        base = SCENARIO_PRESETS[preset]
+    else:
+        raise ValueError(f"unknown scenario preset: {preset!r}")
+    return ScenarioSpec(
+        traffic_count=base.traffic_count if traffic is None else traffic,
+        obstacle_count=base.obstacle_count if obstacles is None else obstacles,
+        reactive_fraction=base.reactive_fraction if reactive is None else reactive,
+    )
