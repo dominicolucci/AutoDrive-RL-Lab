@@ -116,6 +116,14 @@ def train(
         raise ValueError("episodes must be positive")
     if eval_episodes <= 0:
         raise ValueError("eval_episodes must be positive")
+    if scenario == "traffic":
+        resolve_scenario(
+            scenario_preset,
+            traffic=traffic,
+            obstacles=obstacles,
+            reactive=reactive,
+            rng=np.random.default_rng(0),
+        )
 
     agent = DQNAgent(
         DrivingEnv.observation_size,
