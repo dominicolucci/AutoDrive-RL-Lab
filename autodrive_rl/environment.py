@@ -37,6 +37,10 @@ ACTION_NAMES = {
 OBSTACLE_WINDOW_M = 30.0
 OBSTACLE_EGO_CLEAR_M = 60.0
 
+REACTIVE_TIME_HEADWAY_S = 1.5
+REACTIVE_BRAKE_MPS2 = 4.0
+REACTIVE_ACCEL_MPS2 = 2.0
+
 
 @dataclass
 class TrafficCar:
@@ -182,6 +186,7 @@ class DrivingEnv:
 
         forward_step = self.ego_speed_mps * cfg.dt_seconds
         self.distance_m += forward_step
+        self._update_traffic()
         for car in self.traffic:
             car.y_m += (car.speed_mps - self.ego_speed_mps) * cfg.dt_seconds
         self._recycle_traffic()
@@ -405,6 +410,52 @@ class DrivingEnv:
             )
             scores.append((nearest + float(self.rng.uniform(0.0, 3.0)), lane))
         return max(scores)[1]
+
+    def _update_traffic(self) -> None:
+        for car in self.traffic:
+            if car.behavior == "reactive":
+                self._update_reactive(car)
+
+    def _update_reactive(self, car: TrafficCar) -> None:
+        cfg = self.config
+        lane = self.traffic_lane(car)
+        gap, leader_speed = self._front_gap_for(car, lane)
+        assert car.cruise_speed_mps is not None
+        closing = max(0.0, car.speed_mps - leader_speed)
+        threshold = (
+            REACTIVE_TIME_HEADWAY_S * car.speed_mps
+            + closing**2 / (2.0 * REACTIVE_BRAKE_MPS2)
+        )
+        if gap < threshold:
+            car.speed_mps = max(
+                0.0, car.speed_mps - REACTIVE_BRAKE_MPS2 * cfg.dt_seconds
+            )
+        elif car.speed_mps < car.cruise_speed_mps:
+            car.speed_mps = min(
+                car.cruise_speed_mps,
+                car.speed_mps + REACTIVE_ACCEL_MPS2 * cfg.dt_seconds,
+            )
+
+    def _front_gap_for(self, car: TrafficCar, lane: int) -> tuple[float, float]:
+        """Gap to the nearest leader in a lane, plus that leader's speed."""
+
+        cfg = self.config
+        gap = float("inf")
+        leader_speed = 0.0
+        for other in self.traffic:
+            if other is car:
+                continue
+            if self.traffic_lane(other) == lane and other.y_m > car.y_m:
+                candidate = other.y_m - car.y_m - cfg.car_length_m
+                if candidate < gap:
+                    gap = candidate
+                    leader_speed = other.speed_mps
+        if lane == self.current_lane and car.y_m < 0.0:
+            candidate = -car.y_m - cfg.car_length_m
+            if candidate < gap:
+                gap = candidate
+                leader_speed = self.ego_speed_mps
+        return max(0.0, gap), leader_speed
 
     def _has_collision(self) -> bool:
         cfg = self.config
