@@ -106,6 +106,20 @@ class DrivingEnv:
             raise ValueError(f"invalid lane {lane}")
         return float(self.lane_centers_m[lane])
 
+    def traffic_x_m(self, car: TrafficCar) -> float:
+        """The car's actual lateral position, mid-lane-change aware."""
+
+        x = self.lane_center(car.lane)
+        if car.target_lane is not None:
+            target = self.lane_center(car.target_lane)
+            x += (target - x) * car.lane_change_progress
+        return x
+
+    def traffic_lane(self, car: TrafficCar) -> int:
+        """The lane whose center is nearest the car's actual position."""
+
+        return int(np.argmin(np.abs(self.lane_centers_m - self.traffic_x_m(car))))
+
     def reset(
         self,
         *,
@@ -199,16 +213,17 @@ class DrivingEnv:
 
         half_length = cfg.car_length_m
         for car in self.traffic:
+            lane = self.traffic_lane(car)
             if car.y_m >= 0.0:
                 gap = max(0.0, car.y_m - half_length)
-                if gap < front_gaps[car.lane] and gap <= cfg.sensor_range_m:
-                    front_gaps[car.lane] = gap
-                    front_relative[car.lane] = car.speed_mps - self.ego_speed_mps
+                if gap < front_gaps[lane] and gap <= cfg.sensor_range_m:
+                    front_gaps[lane] = gap
+                    front_relative[lane] = car.speed_mps - self.ego_speed_mps
             else:
                 gap = max(0.0, -car.y_m - half_length)
-                if gap < rear_gaps[car.lane] and gap <= cfg.sensor_range_m:
-                    rear_gaps[car.lane] = gap
-                    rear_relative[car.lane] = car.speed_mps - self.ego_speed_mps
+                if gap < rear_gaps[lane] and gap <= cfg.sensor_range_m:
+                    rear_gaps[lane] = gap
+                    rear_relative[lane] = car.speed_mps - self.ego_speed_mps
 
         lane = self.current_lane
         lane_offset = self.ego_x_m - self.lane_center(lane)
@@ -394,7 +409,7 @@ class DrivingEnv:
     def _has_collision(self) -> bool:
         cfg = self.config
         for car in self.traffic:
-            car_x = self.lane_center(car.lane)
+            car_x = self.traffic_x_m(car)
             longitudinal_overlap = abs(car.y_m) < cfg.car_length_m
             lateral_overlap = abs(car_x - self.ego_x_m) < cfg.car_width_m
             if longitudinal_overlap and lateral_overlap:
