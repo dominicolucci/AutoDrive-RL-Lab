@@ -39,7 +39,7 @@ Activate it on Windows PowerShell:
 .venv\Scripts\Activate.ps1
 ```
 
-Install the one Python dependency:
+Install the Python dependencies (NumPy for the simulation, MLflow for experiment tracking):
 
 ```bash
 python -m pip install -r requirements.txt
@@ -100,6 +100,24 @@ python -m autodrive_rl.play --policy dqn --model models/autodrive_dqn_best.npz
 
 Training is stochastic. A short run proves the loop works but usually does not
 produce a reliable driver. Use a few hundred episodes before judging the DQN.
+
+## Track your experiments
+
+Every training run is logged to a local MLflow store in `mlruns/` (no
+account, no network): the full configuration, the git commit, per-episode
+curves (return, distance, crash rate, epsilon, loss), the evaluation
+matrix, and the saved model files. Open the dashboard with:
+
+```bash
+mlflow ui
+```
+
+then visit http://localhost:5000 to browse runs, plot metrics, and compare
+training runs side by side. Opt out of tracking for a single run with:
+
+```bash
+python -m autodrive_rl.train --episodes 300 --no-tracking
+```
 
 ## Compare policies
 
