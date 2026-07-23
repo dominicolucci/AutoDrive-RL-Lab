@@ -2,37 +2,33 @@
 
 Working notes for picking this project back up. Last updated 2026-07-20.
 
-## 1. In flight: realistic traffic behavior (design paused mid-brainstorm)
+## 1. ~~Realistic traffic behavior~~ — DONE (2026-07-23)
 
-**The problem observed:** in the hard presets, traffic does not drive with the
-AI driver's safety in mind. Root cause confirmed in code: cars with
-`behavior="cruiser"` (100% of traffic in the default world, ~50% in `dense`)
-hold constant speed and are blind to every moving vehicle including the ego
-car. They brake only for static obstacles. Only `reactive` cars follow safely
-and check clearance before merging.
+Implemented, roughly option B plus the speed-limit part of C:
 
-**Paused at this question — pick one to resume:**
+- Every moving car (cruiser and reactive) now keeps a physics-based safe
+  following distance from whatever is ahead — cars, obstacles, and the ego —
+  via a shared `_follow_safely`, with an emergency-braking rate
+  (`REACTIVE_EMERGENCY_BRAKE_MPS2`) when comfortable braking cannot shed the
+  closing speed in the available gap.
+- A posted speed limit (`EnvConfig.speed_limit_mps`, 25 m/s) that no traffic
+  car ever exceeds; over-limit cars settle back down to it.
+- Lane changes reject rear gaps with a fast-closing follower (closing-speed
+  aware `_lane_change_ok`), so nobody cuts off the ego or another car.
+- Recycled cars re-enter traffic like real merging drivers: only into a gap
+  with room (`_spawn_gap_ok`), at a speed the flow ahead allows
+  (`_entry_speed`); if no safe gap exists they wait out of range.
+- Cruisers still never change lanes; `reactive_fraction` now means "fraction
+  of drivers who will change lanes when blocked".
 
-- **A. Safe following only** — every car maintains a safe gap and brakes for
-  whatever is ahead (cars, obstacles, ego). Smallest change that fixes the
-  observed problem.
-- **B. Following + safe merging** (was the recommendation) — all cars follow
-  safely AND every lane change requires proper front/rear clearance
-  (including the ego car), with more natural triggering than today's rare
-  0.5%-per-step random roll.
-- **C. Full realistic model** — B plus lane discipline (slower traffic keeps
-  right), speed-limit adherence, and courtesy yielding to merging vehicles.
+Regression tests cover: speed-limit adherence over rollouts, no
+traffic-vs-traffic rear-ends, no rear-ending of the ego, cut-off rejection,
+and emergency braking. Chosen benchmark option: **(i) accept and
+re-benchmark** — BENCHMARK.md is marked historical until the robustness run
+below replaces it.
 
-**Known decision that comes next, whichever is chosen:** making cruisers
-competent changes the DEFAULT world (`DrivingEnv()` with no scenario_spec),
-which invalidates the existing BENCHMARK.md numbers and makes old checkpoint
-comparisons apples-to-oranges. Options are (i) accept it and re-benchmark,
-or (ii) keep a `blind` behavior for the legacy default and make competent
-driving the new presets' behavior.
-
-**Relevant code:** `autodrive_rl/environment.py` — `_update_traffic`,
-`_update_reactive`, `_update_cruiser`, `_front_gap_for`, `_rear_gap_for`,
-`_maybe_start_lane_change`, and the `REACTIVE_*` / `LANE_CHANGE_*` constants.
+Not yet done from option C: lane discipline (slower traffic keeps right) and
+courtesy yielding to merging vehicles.
 
 ## 2. Queued experiment: the robustness run
 

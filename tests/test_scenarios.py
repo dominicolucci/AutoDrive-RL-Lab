@@ -199,14 +199,80 @@ class ReactiveBrakingTests(unittest.TestCase):
             env.step(Action.MAINTAIN)
         self.assertEqual(car.speed_mps, 15.0)
 
-    def test_cruiser_still_blind_to_other_cars(self) -> None:
+    def test_cruiser_brakes_for_slower_car_ahead(self) -> None:
         env = self.make_env()
         leader = TrafficCar(0, 70.0, 5.0)
         car = TrafficCar(0, 40.0, 20.0, behavior="cruiser")
         env.traffic = [leader, car]
+        slowed = False
+        for _ in range(300):
+            env.step(Action.MAINTAIN)
+            if car.speed_mps < 19.0:
+                slowed = True
+            self.assertGreaterEqual(
+                leader.y_m - car.y_m, env.config.car_length_m
+            )
+        self.assertTrue(slowed)
+
+    def test_cruiser_never_rear_ends_ego(self) -> None:
+        env = self.make_env()
+        car = TrafficCar(env.current_lane, -35.0, 24.0, behavior="cruiser")
+        env.traffic = [car]
+        slowed = False
+        for _ in range(300):
+            env.step(Action.MAINTAIN)
+            if car.speed_mps < 23.0:
+                slowed = True
+            self.assertLessEqual(car.y_m, -env.config.car_length_m)
+        self.assertTrue(slowed)
+
+    def test_no_moving_car_ever_exceeds_speed_limit(self) -> None:
+        limit = EnvConfig().speed_limit_mps
+        for seed in range(10):
+            spec = ScenarioSpec(traffic_count=10, obstacle_count=1, reactive_fraction=0.5)
+            env = DrivingEnv(
+                replace(EnvConfig(), max_steps=300),
+                scenario="traffic",
+                seed=seed,
+                scenario_spec=spec,
+            )
+            for car in env.traffic:
+                self.assertLessEqual(car.speed_mps, limit + 1e-9)
+                self.assertLessEqual(car.cruise_speed_mps, limit + 1e-9)
+            for _ in range(200):
+                env.step(Action.MAINTAIN)
+                for car in env.traffic:
+                    self.assertLessEqual(car.speed_mps, limit + 1e-9)
+
+    def test_traffic_cars_never_rear_end_each_other(self) -> None:
+        for seed in range(3):
+            spec = ScenarioSpec(traffic_count=12, obstacle_count=2, reactive_fraction=0.5)
+            env = DrivingEnv(
+                replace(EnvConfig(), max_steps=300),
+                scenario="traffic",
+                seed=seed,
+                scenario_spec=spec,
+            )
+            for _ in range(300):
+                _, _, terminated, truncated, _ = env.step(Action.MAINTAIN)
+                movers = [c for c in env.traffic if c.behavior != "obstacle"]
+                for i, first in enumerate(movers):
+                    for second in movers[i + 1:]:
+                        if env.traffic_lane(first) == env.traffic_lane(second):
+                            self.assertGreaterEqual(
+                                abs(first.y_m - second.y_m),
+                                env.config.car_length_m,
+                            )
+                if terminated or truncated:
+                    break
+
+    def test_speeding_car_settles_back_to_the_limit(self) -> None:
+        env = self.make_env()
+        car = TrafficCar(0, 60.0, 29.0, behavior="cruiser")
+        env.traffic = [car]
         for _ in range(50):
             env.step(Action.MAINTAIN)
-        self.assertEqual(car.speed_mps, 20.0)
+        self.assertLessEqual(car.speed_mps, env.config.speed_limit_mps + 1e-9)
 
     def test_cruiser_brakes_for_obstacle(self) -> None:
         env = self.make_env()
@@ -250,9 +316,24 @@ class LaneChangeTests(unittest.TestCase):
         ego_lane = env.current_lane
         car = TrafficCar(ego_lane - 1, 8.0, 10.0, behavior="reactive", cruise_speed_mps=25.0)
         env.traffic = [car]
-        self.assertLess(env._rear_gap_for(car, ego_lane), 12.0)
+        rear_gap, follower_speed = env._rear_gap_for(car, ego_lane)
+        self.assertLess(rear_gap, 12.0)
+        self.assertEqual(follower_speed, env.ego_speed_mps)
         current_gap, _ = env._front_gap_for(car, ego_lane - 1)
         self.assertFalse(env._lane_change_ok(car, ego_lane, current_gap))
+
+    def test_lane_change_rejects_fast_closing_follower(self) -> None:
+        env = self.make_env()
+        blocker = TrafficCar(0, 60.0, 0.0, behavior="obstacle")
+        car = TrafficCar(0, 30.0, 10.0, behavior="reactive", cruise_speed_mps=24.0)
+        fast_follower = TrafficCar(2, 10.0, 24.0)
+        env.traffic = [blocker, car, fast_follower]
+        current_gap, _ = env._front_gap_for(car, 0)
+        # A 15 m rear gap would have passed the old fixed threshold, but the
+        # follower closes at 14 m/s: merging would cut it off.
+        self.assertFalse(env._lane_change_ok(car, 2, current_gap))
+        fast_follower.speed_mps = 10.0
+        self.assertTrue(env._lane_change_ok(car, 2, current_gap))
 
     def test_lane_change_animates_then_completes(self) -> None:
         env = self.make_env()
