@@ -27,6 +27,22 @@ and emergency braking. Chosen benchmark option: **(i) accept and
 re-benchmark** — BENCHMARK.md is marked historical until the robustness run
 below replaces it.
 
+**Follow-up (2026-07-23): hard no-overlap guarantee.** Traffic cars can no
+longer occupy the same physical space, ever:
+
+- Mid-lane-change cars count as occupying BOTH lanes (`_occupied_lanes`) in
+  every gap check — following, merging, spawning, and obstacle placement.
+- Lane changes abort and smoothly reverse (`_resolve_lane_change_conflicts`,
+  `_abort_lane_change`) when the target gap collapses mid-animation or when
+  two drivers merge toward the same spot (the less-committed one yields).
+  Past 50% progress a change is committed and others yield instead.
+- Recycled obstacles now also check moving cars — an obstacle never appears
+  on top of a car or inside a car's emergency stopping distance.
+
+Pinned by `test_no_two_cars_ever_overlap_geometrically` (rectangle-overlap
+invariant over rollouts with a random ego) plus merge-conflict and abort
+tests.
+
 Not yet done from option C: lane discipline (slower traffic keeps right) and
 courtesy yielding to merging vehicles.
 
