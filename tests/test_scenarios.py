@@ -266,6 +266,75 @@ class ReactiveBrakingTests(unittest.TestCase):
                 if terminated or truncated:
                     break
 
+    def test_no_two_cars_ever_overlap_geometrically(self) -> None:
+        """The hard invariant: no pair of traffic cars (moving or obstacle)
+        may ever occupy the same physical space, even with a wild ego."""
+
+        for seed in range(3):
+            spec = ScenarioSpec(traffic_count=12, obstacle_count=2, reactive_fraction=0.6)
+            env = DrivingEnv(
+                replace(EnvConfig(), max_steps=400),
+                scenario="traffic",
+                seed=seed,
+                scenario_spec=spec,
+            )
+            action_rng = np.random.default_rng(seed + 500)
+            for _ in range(400):
+                _, _, terminated, truncated, _ = env.step(
+                    int(action_rng.integers(0, env.action_size))
+                )
+                for i, first in enumerate(env.traffic):
+                    for second in env.traffic[i + 1:]:
+                        longitudinal = abs(first.y_m - second.y_m)
+                        lateral = abs(env.traffic_x_m(first) - env.traffic_x_m(second))
+                        overlapping = (
+                            longitudinal < env.config.car_length_m
+                            and lateral < env.config.car_width_m
+                        )
+                        self.assertFalse(
+                            overlapping,
+                            f"seed {seed}: {first} overlaps {second}",
+                        )
+                if terminated or truncated:
+                    break
+
+    def test_simultaneous_merges_into_same_gap_resolve(self) -> None:
+        env = self.make_env()
+        first = TrafficCar(
+            0, 50.0, 15.0, behavior="reactive", target_lane=1, lane_change_progress=0.2
+        )
+        second = TrafficCar(
+            2, 51.0, 15.0, behavior="reactive", target_lane=1, lane_change_progress=0.2
+        )
+        env.traffic = [first, second]
+        for _ in range(30):
+            env.step(Action.MAINTAIN)
+            longitudinal = abs(first.y_m - second.y_m)
+            lateral = abs(env.traffic_x_m(first) - env.traffic_x_m(second))
+            self.assertFalse(
+                longitudinal < env.config.car_length_m
+                and lateral < env.config.car_width_m
+            )
+        # They cannot both have completed the merge into lane 1 on top of
+        # each other; at least one must have pulled back.
+        self.assertNotEqual(env.traffic_lane(first), env.traffic_lane(second))
+
+    def test_lane_change_aborts_when_target_gap_collapses(self) -> None:
+        env = self.make_env()
+        changer = TrafficCar(
+            0, 50.0, 15.0, behavior="reactive", target_lane=1, lane_change_progress=0.2
+        )
+        blocker = TrafficCar(1, 53.0, 15.0)
+        env.traffic = [changer, blocker]
+        env.step(Action.MAINTAIN)
+        # The abort reverses the animation: the origin lane becomes the new
+        # target so the car glides back where it came from.
+        self.assertEqual(changer.target_lane, 0)
+        for _ in range(15):
+            env.step(Action.MAINTAIN)
+        self.assertEqual(env.traffic_lane(changer), 0)
+        self.assertIsNone(changer.target_lane)
+
     def test_speeding_car_settles_back_to_the_limit(self) -> None:
         env = self.make_env()
         car = TrafficCar(0, 60.0, 29.0, behavior="cruiser")

@@ -47,6 +47,9 @@ LANE_CHANGE_DURATION_S = 1.2
 LANE_CHANGE_PROBABILITY = 0.005
 LANE_CHANGE_MIN_FRONT_GAP_M = 15.0
 LANE_CHANGE_MIN_REAR_GAP_M = 12.0
+LANE_CHANGE_ABORT_FRONT_M = 6.0
+LANE_CHANGE_ABORT_REAR_M = 4.0
+LANE_CHANGE_CONFLICT_WINDOW_M = 18.0
 
 
 @dataclass
@@ -134,6 +137,19 @@ class DrivingEnv:
         """The lane whose center is nearest the car's actual position."""
 
         return int(np.argmin(np.abs(self.lane_centers_m - self.traffic_x_m(car))))
+
+    def _occupied_lanes(self, car: TrafficCar) -> tuple[int, ...]:
+        """Every lane a car physically claims right now.
+
+        A car mid-lane-change straddles both its origin and target lane, so
+        all gap logic must treat it as present in both. This is central to
+        the no-overlap guarantee: no driver ever plans around only half of a
+        lane-changing car.
+        """
+
+        if car.target_lane is None:
+            return (car.lane,)
+        return (car.lane, car.target_lane)
 
     def reset(
         self,
@@ -397,6 +413,20 @@ class DrivingEnv:
 
     def _obstacle_position_ok(self, lane: int, y_m: float) -> bool:
         cfg = self.config
+        # An obstacle must never appear on top of a moving car, nor so close
+        # ahead of one that even emergency braking could not avoid it. Movers
+        # ahead of the candidate only need clear spacing, since they drive
+        # away from it.
+        for car in self.traffic:
+            if car.behavior == "obstacle" or lane not in self._occupied_lanes(car):
+                continue
+            if car.y_m <= y_m:
+                gap = y_m - car.y_m - cfg.car_length_m
+                stopping_distance = car.speed_mps**2 / (2.0 * REACTIVE_BRAKE_MPS2)
+                if gap < REACTIVE_MIN_GAP_M + stopping_distance + cfg.car_length_m:
+                    return False
+            elif car.y_m - y_m < 24.0:
+                return False
         obstacles = [(car.lane, car.y_m) for car in self.traffic if car.behavior == "obstacle"]
         for other_lane, other_y in obstacles:
             if other_lane == lane and abs(other_y - y_m) < 24.0:
@@ -464,7 +494,7 @@ class DrivingEnv:
 
         return not any(
             car is not ignore
-            and self.traffic_lane(car) == lane
+            and lane in self._occupied_lanes(car)
             and abs(car.y_m - y_m) < 24.0
             for car in self.traffic
         )
@@ -491,7 +521,7 @@ class DrivingEnv:
         for other in self.traffic:
             if other is ignore:
                 continue
-            if self.traffic_lane(other) == lane and other.y_m > y_m:
+            if lane in self._occupied_lanes(other) and other.y_m > y_m:
                 candidate = other.y_m - y_m - cfg.car_length_m
                 if candidate < gap:
                     gap = candidate
@@ -524,6 +554,7 @@ class DrivingEnv:
 
     def _update_traffic(self) -> None:
         cfg = self.config
+        self._resolve_lane_change_conflicts()
         for car in self.traffic:
             if car.behavior == "reactive":
                 self._update_reactive(car)
@@ -536,11 +567,58 @@ class DrivingEnv:
                     car.target_lane = None
                     car.lane_change_progress = 0.0
 
+    def _resolve_lane_change_conflicts(self) -> None:
+        """Abort lane changes that have become unsafe mid-animation.
+
+        Real drivers glance again mid-merge and pull back when the gap has
+        gone away. Two situations trigger an abort while a change is still
+        in its first half: another car is merging into the same lane at
+        nearly the same position (the less-committed driver yields), or the
+        target-lane gap has collapsed below a critical margin. Past the
+        halfway point the car is already mostly in the new lane, so it
+        commits and everyone else keeps distance instead.
+        """
+
+        changers = [car for car in self.traffic if car.target_lane is not None]
+        for car in changers:
+            if car.lane_change_progress >= 0.5:
+                continue
+            conflict = False
+            for other in changers:
+                if other is car or other.target_lane != car.target_lane:
+                    continue
+                if abs(other.y_m - car.y_m) >= LANE_CHANGE_CONFLICT_WINDOW_M:
+                    continue
+                yields = (car.lane_change_progress, car.y_m) <= (
+                    other.lane_change_progress,
+                    other.y_m,
+                )
+                if yields:
+                    conflict = True
+                    break
+            if not conflict:
+                assert car.target_lane is not None
+                front_gap, _ = self._front_gap_for(car, car.target_lane)
+                rear_gap, _ = self._rear_gap_for(car, car.target_lane)
+                if (
+                    front_gap >= LANE_CHANGE_ABORT_FRONT_M
+                    and rear_gap >= LANE_CHANGE_ABORT_REAR_M
+                ):
+                    continue
+            self._abort_lane_change(car)
+
+    def _abort_lane_change(self, car: TrafficCar) -> None:
+        """Smoothly reverse an in-progress lane change back to its origin."""
+
+        assert car.target_lane is not None
+        car.lane, car.target_lane = car.target_lane, car.lane
+        car.lane_change_progress = 1.0 - car.lane_change_progress
+
     def _update_reactive(self, car: TrafficCar) -> None:
         """Reactive drivers follow safely and change lanes when blocked."""
 
         lane = self.traffic_lane(car)
-        gap, leader_speed = self._front_gap_for(car, lane)
+        gap, leader_speed = self._nearest_front_gap(car)
         self._follow_safely(car, gap, leader_speed)
         assert car.cruise_speed_mps is not None
         if (
@@ -613,7 +691,7 @@ class DrivingEnv:
         for other in self.traffic:
             if other is car:
                 continue
-            if self.traffic_lane(other) == lane and other.y_m > car.y_m:
+            if lane in self._occupied_lanes(other) and other.y_m > car.y_m:
                 candidate = other.y_m - car.y_m - cfg.car_length_m
                 if candidate < gap:
                     gap = candidate
@@ -624,6 +702,18 @@ class DrivingEnv:
                 gap = candidate
                 leader_speed = self.ego_speed_mps
         return max(0.0, gap), leader_speed
+
+    def _nearest_front_gap(self, car: TrafficCar) -> tuple[float, float]:
+        """The tightest front gap over every lane the car occupies."""
+
+        gap = float("inf")
+        leader_speed = 0.0
+        for lane in self._occupied_lanes(car):
+            lane_gap, lane_speed = self._front_gap_for(car, lane)
+            if lane_gap < gap:
+                gap = lane_gap
+                leader_speed = lane_speed
+        return gap, leader_speed
 
     def _maybe_start_lane_change(self, car: TrafficCar, lane: int) -> None:
         current_gap, _ = self._front_gap_for(car, lane)
@@ -665,7 +755,7 @@ class DrivingEnv:
         for other in self.traffic:
             if other is car:
                 continue
-            if self.traffic_lane(other) == lane and other.y_m < car.y_m:
+            if lane in self._occupied_lanes(other) and other.y_m < car.y_m:
                 candidate = car.y_m - other.y_m - cfg.car_length_m
                 if candidate < gap:
                     gap = candidate
