@@ -17,6 +17,8 @@ class EnvConfig:
     car_length_m: float = 4.6
     max_speed_mps: float = 30.0
     target_speed_mps: float = 24.0
+    speed_limit_mps: float = 25.0
+    traffic_min_speed_mps: float = 9.0
     max_lateral_speed_mps: float = 2.6
     acceleration_mps2: float = 3.2
     braking_mps2: float = 6.5

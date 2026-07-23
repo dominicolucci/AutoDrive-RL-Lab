@@ -39,6 +39,7 @@ OBSTACLE_EGO_CLEAR_M = 60.0
 
 REACTIVE_TIME_HEADWAY_S = 1.5
 REACTIVE_BRAKE_MPS2 = 4.0
+REACTIVE_EMERGENCY_BRAKE_MPS2 = 8.0
 REACTIVE_ACCEL_MPS2 = 2.0
 REACTIVE_MIN_GAP_M = 2.0
 
@@ -56,7 +57,11 @@ class TrafficCar:
     y_m: float
     speed_mps: float
     color_index: int = 0
-    behavior: str = "cruiser"  # "cruiser" | "reactive" | "obstacle"
+    # "cruiser": keeps a safe following distance, never changes lanes.
+    # "reactive": keeps a safe following distance, changes lanes when blocked.
+    # "obstacle": static hazard, never moves.
+    # All moving drivers respect the posted speed limit.
+    behavior: str = "cruiser"
     cruise_speed_mps: float | None = None
     target_lane: int | None = None
     lane_change_progress: float = 0.0
@@ -356,14 +361,20 @@ class DrivingEnv:
             attempts += 1
             lane = int(self.rng.integers(0, cfg.lane_count))
             y_m = float(self.rng.uniform(22.0, cfg.sensor_range_m + 55.0))
-            if any(car.lane == lane and abs(car.y_m - y_m) < 24.0 for car in self.traffic):
+            if not self._spawn_gap_ok(lane, y_m):
                 continue
-            speed = float(self.rng.uniform(9.0, 26.0))
+            cruise = self._sample_legal_speed()
+            speed = self._entry_speed(lane, y_m, cruise)
             color_index = int(self.rng.integers(0, 6))
             behavior = "cruiser"
             if reactive_fraction > 0.0 and self.rng.random() < reactive_fraction:
                 behavior = "reactive"
-            self.traffic.append(TrafficCar(lane, y_m, speed, color_index, behavior=behavior))
+            self.traffic.append(
+                TrafficCar(
+                    lane, y_m, speed, color_index,
+                    behavior=behavior, cruise_speed_mps=cruise,
+                )
+            )
 
     def _spawn_obstacles(self) -> None:
         spec = self.scenario_spec
@@ -425,13 +436,79 @@ class DrivingEnv:
                         car.y_m = y_m
                         break
                 continue
-            car.lane = self._least_crowded_spawn_lane()
-            car.y_m = float(self.rng.uniform(cfg.sensor_range_m + 20.0, cfg.sensor_range_m + 80.0))
-            car.speed_mps = float(self.rng.uniform(9.0, 26.0))
-            car.color_index = int(self.rng.integers(0, 6))
-            car.cruise_speed_mps = car.speed_mps
-            car.target_lane = None
-            car.lane_change_progress = 0.0
+            # Re-enter traffic like a real merging driver: only into a gap
+            # with room, and never faster than the flow ahead allows.
+            for _ in range(50):
+                lane = self._least_crowded_spawn_lane()
+                y_m = float(
+                    self.rng.uniform(cfg.sensor_range_m + 20.0, cfg.sensor_range_m + 80.0)
+                )
+                if not self._spawn_gap_ok(lane, y_m, ignore=car):
+                    continue
+                cruise = self._sample_legal_speed()
+                car.lane = lane
+                car.y_m = y_m
+                car.cruise_speed_mps = cruise
+                car.speed_mps = self._entry_speed(lane, y_m, cruise, ignore=car)
+                car.color_index = int(self.rng.integers(0, 6))
+                car.target_lane = None
+                car.lane_change_progress = 0.0
+                break
+            # If no safe gap exists this step, the car simply stays out of
+            # range and tries again on a later step.
+
+    def _spawn_gap_ok(
+        self, lane: int, y_m: float, *, ignore: TrafficCar | None = None
+    ) -> bool:
+        """True when no other car occupies the entry gap in this lane."""
+
+        return not any(
+            car is not ignore
+            and self.traffic_lane(car) == lane
+            and abs(car.y_m - y_m) < 24.0
+            for car in self.traffic
+        )
+
+    def _entry_speed(
+        self,
+        lane: int,
+        y_m: float,
+        sampled: float,
+        *,
+        ignore: TrafficCar | None = None,
+    ) -> float:
+        """A safe speed for a car joining the flow at (lane, y_m).
+
+        Real drivers match the traffic ahead of them. The cap is the highest
+        speed from which comfortable braking can settle to the leader's speed
+        within the available gap, so an entering car never has to slam its
+        brakes or rear-end anyone.
+        """
+
+        cfg = self.config
+        gap = float("inf")
+        leader_speed = 0.0
+        for other in self.traffic:
+            if other is ignore:
+                continue
+            if self.traffic_lane(other) == lane and other.y_m > y_m:
+                candidate = other.y_m - y_m - cfg.car_length_m
+                if candidate < gap:
+                    gap = candidate
+                    leader_speed = other.speed_mps
+        if not np.isfinite(gap):
+            return sampled
+        stopping_gap = max(gap - REACTIVE_MIN_GAP_M, 0.0)
+        safe_speed = leader_speed + np.sqrt(2.0 * REACTIVE_BRAKE_MPS2 * stopping_gap)
+        return float(min(sampled, safe_speed))
+
+    def _sample_legal_speed(self) -> float:
+        """A cruise speed for a law-abiding driver: never above the limit."""
+
+        cfg = self.config
+        return float(
+            self.rng.uniform(cfg.traffic_min_speed_mps, cfg.speed_limit_mps)
+        )
 
     def _least_crowded_spawn_lane(self) -> int:
         cfg = self.config
@@ -460,25 +537,12 @@ class DrivingEnv:
                     car.lane_change_progress = 0.0
 
     def _update_reactive(self, car: TrafficCar) -> None:
-        cfg = self.config
+        """Reactive drivers follow safely and change lanes when blocked."""
+
         lane = self.traffic_lane(car)
         gap, leader_speed = self._front_gap_for(car, lane)
+        self._follow_safely(car, gap, leader_speed)
         assert car.cruise_speed_mps is not None
-        closing = max(0.0, car.speed_mps - leader_speed)
-        threshold = (
-            REACTIVE_MIN_GAP_M
-            + REACTIVE_TIME_HEADWAY_S * car.speed_mps
-            + closing**2 / (2.0 * REACTIVE_BRAKE_MPS2)
-        )
-        if gap < threshold:
-            car.speed_mps = max(
-                0.0, car.speed_mps - REACTIVE_BRAKE_MPS2 * cfg.dt_seconds
-            )
-        elif car.speed_mps < car.cruise_speed_mps:
-            car.speed_mps = min(
-                car.cruise_speed_mps,
-                car.speed_mps + REACTIVE_ACCEL_MPS2 * cfg.dt_seconds,
-            )
         if (
             car.target_lane is None
             and car.speed_mps < 0.8 * car.cruise_speed_mps
@@ -487,30 +551,57 @@ class DrivingEnv:
             self._maybe_start_lane_change(car, lane)
 
     def _update_cruiser(self, car: TrafficCar) -> None:
-        """Cruisers are blind to other cars but brake for static obstacles."""
+        """Cruisers drive like ordinary careful drivers.
+
+        They keep a physics-based safe following distance behind whatever is
+        ahead of them in their lane (traffic cars, static obstacles, and the
+        ego car alike) and hold their cruise speed otherwise. Unlike reactive
+        drivers they never change lanes.
+        """
+
+        lane = self.traffic_lane(car)
+        gap, leader_speed = self._front_gap_for(car, lane)
+        self._follow_safely(car, gap, leader_speed)
+
+    def _follow_safely(self, car: TrafficCar, gap: float, leader_speed: float) -> None:
+        """Brake when the safe-stopping envelope is violated, else cruise.
+
+        The threshold combines a minimum standstill gap, a time headway, and
+        the extra distance needed to shed any closing speed at a comfortable
+        braking rate. Cruise speeds are additionally clamped to the posted
+        speed limit so no simulated driver ever speeds.
+        """
 
         cfg = self.config
-        lane = self.traffic_lane(car)
-        gap = float("inf")
-        for other in self.traffic:
-            if other is car or other.behavior != "obstacle":
-                continue
-            if self.traffic_lane(other) == lane and other.y_m > car.y_m:
-                gap = min(gap, other.y_m - car.y_m - cfg.car_length_m)
         assert car.cruise_speed_mps is not None
+        legal_cruise = min(car.cruise_speed_mps, cfg.speed_limit_mps)
+        closing = max(0.0, car.speed_mps - leader_speed)
         threshold = (
             REACTIVE_MIN_GAP_M
             + REACTIVE_TIME_HEADWAY_S * car.speed_mps
-            + car.speed_mps**2 / (2.0 * REACTIVE_BRAKE_MPS2)
+            + closing**2 / (2.0 * REACTIVE_BRAKE_MPS2)
         )
         if gap < threshold:
-            car.speed_mps = max(
-                0.0, car.speed_mps - REACTIVE_BRAKE_MPS2 * cfg.dt_seconds
+            # Comfortable braking is the norm, but when the remaining gap is
+            # too short to shed the closing speed at the comfortable rate, a
+            # real driver brakes hard instead of causing a rear-end crash.
+            stopping_gap = max(gap - REACTIVE_MIN_GAP_M, 0.1)
+            required_decel = closing**2 / (2.0 * stopping_gap)
+            brake = (
+                REACTIVE_EMERGENCY_BRAKE_MPS2
+                if required_decel > REACTIVE_BRAKE_MPS2
+                else REACTIVE_BRAKE_MPS2
             )
-        elif car.speed_mps < car.cruise_speed_mps:
+            car.speed_mps = max(0.0, car.speed_mps - brake * cfg.dt_seconds)
+        elif car.speed_mps < legal_cruise:
             car.speed_mps = min(
-                car.cruise_speed_mps,
+                legal_cruise,
                 car.speed_mps + REACTIVE_ACCEL_MPS2 * cfg.dt_seconds,
+            )
+        elif car.speed_mps > cfg.speed_limit_mps:
+            car.speed_mps = max(
+                cfg.speed_limit_mps,
+                car.speed_mps - REACTIVE_BRAKE_MPS2 * cfg.dt_seconds,
             )
 
     def _front_gap_for(self, car: TrafficCar, lane: int) -> tuple[float, float]:
@@ -546,25 +637,45 @@ class DrivingEnv:
                 return
 
     def _lane_change_ok(self, car: TrafficCar, candidate: int, current_gap: float) -> bool:
+        """A courteous lane change: enough room ahead, and no cut-off behind.
+
+        The rear requirement grows with how fast the trailing car (or the ego)
+        is closing, so a driver never merges into a gap that forces someone
+        behind to brake hard.
+        """
+
         front_gap, _ = self._front_gap_for(car, candidate)
-        rear_gap = self._rear_gap_for(car, candidate)
+        rear_gap, follower_speed = self._rear_gap_for(car, candidate)
+        rear_closing = max(0.0, follower_speed - car.speed_mps)
+        required_rear_gap = (
+            LANE_CHANGE_MIN_REAR_GAP_M + REACTIVE_TIME_HEADWAY_S * rear_closing
+        )
         return (
             front_gap > current_gap
             and front_gap >= LANE_CHANGE_MIN_FRONT_GAP_M
-            and rear_gap >= LANE_CHANGE_MIN_REAR_GAP_M
+            and rear_gap >= required_rear_gap
         )
 
-    def _rear_gap_for(self, car: TrafficCar, lane: int) -> float:
+    def _rear_gap_for(self, car: TrafficCar, lane: int) -> tuple[float, float]:
+        """Gap to the nearest follower in a lane, plus that follower's speed."""
+
         cfg = self.config
         gap = float("inf")
+        follower_speed = 0.0
         for other in self.traffic:
             if other is car:
                 continue
             if self.traffic_lane(other) == lane and other.y_m < car.y_m:
-                gap = min(gap, car.y_m - other.y_m - cfg.car_length_m)
+                candidate = car.y_m - other.y_m - cfg.car_length_m
+                if candidate < gap:
+                    gap = candidate
+                    follower_speed = other.speed_mps
         if lane == self.current_lane and car.y_m > 0.0:
-            gap = min(gap, car.y_m - cfg.car_length_m)
-        return max(0.0, gap)
+            candidate = car.y_m - cfg.car_length_m
+            if candidate < gap:
+                gap = candidate
+                follower_speed = self.ego_speed_mps
+        return max(0.0, gap), follower_speed
 
     def _has_collision(self) -> bool:
         cfg = self.config
