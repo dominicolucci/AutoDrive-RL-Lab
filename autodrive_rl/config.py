@@ -15,9 +15,9 @@ class EnvConfig:
     lane_width_m: float = 3.7
     car_width_m: float = 1.9
     car_length_m: float = 4.6
-    max_speed_mps: float = 30.0
-    target_speed_mps: float = 24.0
-    speed_limit_mps: float = 25.0
+    max_speed_mps: float = 49.0   # ~110 mph flat-out
+    target_speed_mps: float = 28.0
+    speed_limit_mps: float = 29.0  # ~65 mph posted limit
     traffic_min_speed_mps: float = 9.0
     max_lateral_speed_mps: float = 2.6
     acceleration_mps2: float = 3.2

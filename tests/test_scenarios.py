@@ -15,8 +15,9 @@ from autodrive_rl.config import (
     resolve_scenario,
     sample_scenario,
 )
+from autodrive_rl.clone import DemoRecorder, load_demos, save_clone, train_clone
 from autodrive_rl.dqn import DQNAgent
-from autodrive_rl.environment import Action, DrivingEnv, TrafficCar
+from autodrive_rl.environment import Action, DrivingEnv, TrafficCar, grade_letter
 from autodrive_rl.play import build_parser as build_play_parser
 from autodrive_rl.train import build_parser, train
 
@@ -567,6 +568,263 @@ class PlayParserTests(unittest.TestCase):
         )
         self.assertEqual(args.scenario_preset, "dense")
         self.assertEqual(args.obstacles, 3)
+
+
+class BehaviorCloningTests(unittest.TestCase):
+    """Recording human driving and cloning it with supervised learning."""
+
+    def test_recorder_drops_crashed_episodes(self) -> None:
+        recorder = DemoRecorder()
+        recorder.add(np.zeros(16, dtype=np.float32), 1)
+        recorder.end_episode(crashed=True)
+        recorder.add(np.ones(16, dtype=np.float32), 2)
+        recorder.add(np.ones(16, dtype=np.float32), 3)
+        recorder.end_episode(crashed=False)
+        with tempfile.TemporaryDirectory() as directory:
+            path = recorder.save(Path(directory) / "demo.npz")
+            observations, actions = load_demos([path])
+        self.assertEqual(list(actions), [2, 3])
+        self.assertEqual(observations.shape, (2, 16))
+        self.assertEqual(recorder.dropped_episodes, 1)
+
+    def test_recorder_refuses_to_save_nothing(self) -> None:
+        recorder = DemoRecorder()
+        recorder.add(np.zeros(16, dtype=np.float32), 0)
+        recorder.end_episode(crashed=True)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                recorder.save(Path(directory) / "demo.npz")
+
+    def test_clone_learns_and_is_a_drop_in_dqn_policy(self) -> None:
+        rng = np.random.default_rng(0)
+        observations = rng.uniform(-1, 1, size=(400, 16)).astype(np.float32)
+        actions = np.where(observations[:, 0] > 0.0, 2, 1).astype(np.int64)
+        network, result = train_clone(
+            observations, actions, epochs=40, batch_size=64, seed=1, verbose=False
+        )
+        self.assertGreater(result.train_accuracy, 0.9)
+        with tempfile.TemporaryDirectory() as directory:
+            path = save_clone(
+                network,
+                Path(directory) / "clone.npz",
+                observation_size=16,
+                action_size=5,
+            )
+            agent = DQNAgent.load(path, seed=0)
+        sample = observations[:20]
+        network_choice = list(np.argmax(np.asarray(network.forward(sample)), axis=1))
+        agent_choice = [agent.act(row, explore=False) for row in sample]
+        self.assertEqual(network_choice, agent_choice)
+
+    def test_play_parser_has_record_flag(self) -> None:
+        args = build_play_parser().parse_args([])
+        self.assertIsNone(args.record)
+        args = build_play_parser().parse_args(["--record", "demos/me.npz"])
+        self.assertEqual(args.record, Path("demos/me.npz"))
+
+
+class QValueTests(unittest.TestCase):
+    def test_q_values_shape_and_greedy_consistency(self) -> None:
+        agent = DQNAgent(DrivingEnv.observation_size, DrivingEnv.action_size, seed=0)
+        env = DrivingEnv(scenario="traffic", seed=0)
+        observation, _ = env.reset(seed=0)
+        q = agent.q_values(observation)
+        self.assertEqual(q.shape, (DrivingEnv.action_size,))
+        self.assertEqual(int(np.argmax(q)), agent.act(observation, explore=False))
+
+
+class FastFlowSafetyTests(unittest.TestCase):
+    """Safety margins that must hold at the 65 mph traffic flow."""
+
+    def test_entry_speed_assumes_leader_may_stop(self) -> None:
+        # A car merging behind a leader that is mid-emergency-brake must
+        # enter slowly enough to stop before the leader's halting point —
+        # never at a speed that only works if the flow stays fast.
+        env = DrivingEnv(scenario="traffic", seed=0)
+        env.traffic = [TrafficCar(1, 180.0, 14.0)]
+        entry = env._entry_speed(1, 160.0, env.config.speed_limit_mps)
+        gap = 180.0 - 160.0 - env.config.car_length_m
+        # Comfortable stop from the entry speed must fit within the gap
+        # plus the leader's own emergency stopping distance.
+        available = (gap - 3.0) + 14.0**2 / (2.0 * 9.0)
+        self.assertLessEqual(entry**2 / (2.0 * 4.0), available + 1e-6)
+        self.assertLess(entry, env.config.speed_limit_mps)
+
+    def test_lane_change_rejects_fast_closing_follower_at_speed(self) -> None:
+        env = DrivingEnv(scenario="traffic", seed=0)
+        slow = TrafficCar(0, 40.0, 10.0, behavior="reactive", cruise_speed_mps=12.0)
+        follower = TrafficCar(1, 20.0, env.config.speed_limit_mps)
+        env.traffic = [slow, follower]
+        # 20 m rear gap but ~19 m/s closing: merging would force the
+        # follower into an emergency stop, so the change must be refused.
+        self.assertFalse(env._lane_change_ok(slow, 1, 5.0))
+
+
+class AutopilotHandoverTests(unittest.TestCase):
+    """Randomized start states and the manual-mode autopilot plumbing."""
+
+    def test_randomized_start_varies_and_stays_on_road(self) -> None:
+        cfg = EnvConfig()
+        limit = cfg.road_half_width_m - cfg.car_width_m / 2.0
+        positions = set()
+        for seed in range(12):
+            env = DrivingEnv(scenario="traffic", seed=seed)
+            env.reset(seed=seed, options={"randomize_start": True})
+            self.assertLessEqual(abs(env.ego_x_m), limit)
+            self.assertTrue(6.0 <= env.ego_speed_mps <= cfg.speed_limit_mps)
+            self.assertFalse(env._has_collision())
+            positions.add(round(env.ego_x_m, 3))
+        self.assertGreater(len(positions), 6)
+
+    def test_randomized_start_is_reproducible(self) -> None:
+        env_a = DrivingEnv(scenario="traffic", seed=3)
+        env_a.reset(seed=3, options={"randomize_start": True})
+        env_b = DrivingEnv(scenario="traffic", seed=3)
+        env_b.reset(seed=3, options={"randomize_start": True})
+        self.assertEqual(env_a.ego_x_m, env_b.ego_x_m)
+        self.assertEqual(env_a.ego_speed_mps, env_b.ego_speed_mps)
+
+    def test_plain_reset_is_unchanged(self) -> None:
+        env = DrivingEnv(scenario="traffic", seed=5)
+        env.reset(seed=5)
+        self.assertEqual(env.ego_x_m, env.lane_center(env.config.lane_count // 2))
+        self.assertEqual(env.ego_speed_mps, 12.0)
+
+    def test_train_parser_has_handover_flag(self) -> None:
+        args = build_parser().parse_args([])
+        self.assertFalse(args.handover)
+        args = build_parser().parse_args(["--handover"])
+        self.assertTrue(args.handover)
+
+    def test_play_parser_has_autopilot_model(self) -> None:
+        args = build_play_parser().parse_args([])
+        self.assertEqual(args.autopilot_model, Path("models/autopilot.npz"))
+
+    def test_handover_training_smoke(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            _, records = train(
+                episodes=3,
+                env_config=replace(EnvConfig(), max_steps=40),
+                seed=2,
+                curriculum=False,
+                handover=True,
+                eval_every=0,
+                eval_episodes=1,
+                log_every=100,
+                output_path=base / "m.npz",
+                metrics_path=base / "m.csv",
+            )
+            self.assertEqual(len(records), 3)
+            self.assertTrue((base / "m.npz").exists())
+
+
+class DrivingGradeTests(unittest.TestCase):
+    """The real-time report card: laws, courtesy, and physical clearances."""
+
+    def _empty_env(self) -> DrivingEnv:
+        return DrivingEnv(scenario="lane", seed=0)
+
+    def test_riding_the_divider_is_penalized(self) -> None:
+        env = self._empty_env()
+        env.ego_x_m = env.lane_center(1) - env.config.lane_width_m / 2.0
+        env.ego_lateral_speed_mps = 0.0
+        env.ego_speed_mps = 20.0
+        env.step(Action.MAINTAIN)
+        self.assertLess(env.last_reward_terms["divider_straddle"], -0.5)
+
+    def test_centered_driving_is_not_penalized(self) -> None:
+        env = self._empty_env()
+        env.ego_speed_mps = 20.0
+        env.step(Action.MAINTAIN)
+        self.assertEqual(env.last_reward_terms["divider_straddle"], 0.0)
+
+    def test_brisk_crossing_is_not_penalized(self) -> None:
+        env = self._empty_env()
+        env.ego_speed_mps = 20.0
+        env.ego_x_m = env.lane_center(1) + env.config.lane_width_m / 2.0
+        env.ego_lateral_speed_mps = env.config.max_lateral_speed_mps
+        env.step(Action.STEER_RIGHT)
+        self.assertEqual(env.last_reward_terms["divider_straddle"], 0.0)
+
+    def test_speeding_beyond_grace_is_penalized(self) -> None:
+        env = self._empty_env()
+        env.ego_speed_mps = env.config.max_speed_mps
+        env.step(Action.MAINTAIN)
+        self.assertLess(env.last_reward_terms["speeding"], -0.5)
+
+    def test_at_the_limit_is_not_penalized(self) -> None:
+        env = self._empty_env()
+        env.ego_speed_mps = env.config.speed_limit_mps
+        env.step(Action.MAINTAIN)
+        self.assertEqual(env.last_reward_terms["speeding"], 0.0)
+
+    def test_slight_touch_during_merge_is_a_collision(self) -> None:
+        env = DrivingEnv(scenario="traffic", seed=0)
+        env.traffic = [TrafficCar(1, env.config.car_length_m, env.ego_speed_mps)]
+        self.assertTrue(env._has_collision())
+
+    def test_side_brush_is_a_collision(self) -> None:
+        env = DrivingEnv(scenario="traffic", seed=0)
+        env.traffic = [TrafficCar(2, 0.0, env.ego_speed_mps)]
+        env.ego_x_m = env.lane_center(2) - env.config.car_width_m
+        self.assertTrue(env._has_collision())
+
+    def test_clear_gap_is_not_a_collision(self) -> None:
+        env = DrivingEnv(scenario="traffic", seed=0)
+        env.traffic = [
+            TrafficCar(1, env.config.car_length_m + 0.5, env.ego_speed_mps)
+        ]
+        self.assertFalse(env._has_collision())
+
+    def test_cutting_off_a_follower_is_penalized(self) -> None:
+        env = DrivingEnv(scenario="traffic", seed=0)
+        env.ego_speed_mps = 20.0
+        env.traffic = [TrafficCar(2, -8.0, 20.0)]
+        env.ego_x_m = env.lane_center(2)  # ego lands here mid-merge
+        env.step(Action.MAINTAIN)
+        self.assertLess(env.last_reward_terms["cut_off"], 0.0)
+
+    def test_merge_with_room_is_not_a_cut_off(self) -> None:
+        env = DrivingEnv(scenario="traffic", seed=0)
+        env.ego_speed_mps = 20.0
+        env.traffic = [TrafficCar(2, -40.0, 20.0)]
+        env.ego_x_m = env.lane_center(2)
+        env.step(Action.MAINTAIN)
+        self.assertEqual(env.last_reward_terms["cut_off"], 0.0)
+
+    def test_threading_a_tight_gap_is_penalized_without_contact(self) -> None:
+        env = DrivingEnv(scenario="traffic", seed=0)
+        env.ego_speed_mps = 20.0
+        env.traffic = [TrafficCar(2, 0.0, 20.0)]
+        env.ego_x_m = env.lane_center(2) - env.config.car_width_m - 0.3
+        env.step(Action.MAINTAIN)
+        self.assertLess(env.last_reward_terms["near_miss"], 0.0)
+
+    def test_grade_starts_at_100_and_drops_when_speeding(self) -> None:
+        env = self._empty_env()
+        self.assertEqual(env.grade_score, 100.0)
+        for _ in range(30):
+            env.ego_speed_mps = env.config.max_speed_mps
+            env.step(Action.MAINTAIN)
+        self.assertLess(env.grade_score, 95.0)
+
+    def test_crash_zeroes_the_grade(self) -> None:
+        env = DrivingEnv(scenario="traffic", seed=0)
+        env.traffic = [TrafficCar(1, 2.0, 10.0)]
+        env.step(Action.MAINTAIN)
+        self.assertEqual(env.grade_score, 0.0)
+
+    def test_grade_letters_map_sensibly(self) -> None:
+        self.assertEqual(grade_letter(100.0), "A+")
+        self.assertEqual(grade_letter(85.0), "B")
+        self.assertEqual(grade_letter(50.0), "F")
+
+    def test_info_reports_the_grade(self) -> None:
+        env = self._empty_env()
+        _, _, _, _, info = env.step(Action.MAINTAIN)
+        self.assertIn("driving_grade", info)
+        self.assertIn("grade_letter", info)
 
 
 if __name__ == "__main__":

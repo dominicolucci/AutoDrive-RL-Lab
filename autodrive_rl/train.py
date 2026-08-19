@@ -53,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="begin with lane keeping before introducing traffic (default: on)",
     )
+    parser.add_argument(
+        "--handover",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "randomize episode start states (position, speed, drift) so the "
+            "policy learns to take over mid-drive, e.g. as an autopilot "
+            "(default: off)"
+        ),
+    )
     parser.add_argument("--eval-every", type=int, default=25)
     parser.add_argument("--eval-episodes", type=int, default=3)
     parser.add_argument("--log-every", type=int, default=5)
@@ -115,6 +125,7 @@ def train(
     seed: int = 7,
     scenario: str = "traffic",
     curriculum: bool = True,
+    handover: bool = False,
     scenario_preset: str = "random",
     traffic: int | None = None,
     obstacles: int | None = None,
@@ -164,6 +175,7 @@ def train(
             "seed": seed,
             "scenario": scenario,
             "curriculum": curriculum,
+            "handover": handover,
             "scenario_preset": scenario_preset,
             "traffic": traffic,
             "obstacles": obstacles,
@@ -213,7 +225,10 @@ def train(
             env = DrivingEnv(
                 episode_config, scenario=env_scenario, seed=seed + episode, scenario_spec=episode_spec
             )
-            observation, _ = env.reset(seed=seed + episode)
+            observation, _ = env.reset(
+                seed=seed + episode,
+                options={"randomize_start": True} if handover else None,
+            )
             episode_return = 0.0
             episode_losses: list[float] = []
             speed_sum = 0.0
@@ -362,6 +377,7 @@ def main(argv: list[str] | None = None) -> None:
         seed=args.seed,
         scenario=args.scenario,
         curriculum=args.curriculum,
+        handover=args.handover,
         scenario_preset=args.scenario_preset,
         traffic=args.traffic,
         obstacles=args.obstacles,

@@ -226,6 +226,15 @@ class DQNAgent:
         q_values = self.online.forward(observation)
         return int(np.argmax(np.asarray(q_values)[0]))
 
+    def q_values(self, observation: np.ndarray) -> np.ndarray:
+        """The online network's action values for one observation.
+
+        Exposed for visualization: watching these five numbers move each
+        frame is the clearest window into what the learned policy wants.
+        """
+
+        return np.asarray(self.online.forward(observation), dtype=np.float32)[0]
+
     def observe(
         self,
         observation: np.ndarray,

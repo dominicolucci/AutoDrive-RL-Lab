@@ -39,9 +39,12 @@ OBSTACLE_EGO_CLEAR_M = 60.0
 
 REACTIVE_TIME_HEADWAY_S = 1.5
 REACTIVE_BRAKE_MPS2 = 4.0
-REACTIVE_EMERGENCY_BRAKE_MPS2 = 8.0
+REACTIVE_EMERGENCY_BRAKE_MPS2 = 9.0
 REACTIVE_ACCEL_MPS2 = 2.0
-REACTIVE_MIN_GAP_M = 2.0
+# Sized for the 65 mph flow: at higher speeds the discrete 0.1 s tick moves
+# cars up to ~2 m per step, so the standstill margin must absorb a full
+# step of closing motion on top of a real-world bumper gap.
+REACTIVE_MIN_GAP_M = 3.0
 
 LANE_CHANGE_DURATION_S = 1.2
 LANE_CHANGE_PROBABILITY = 0.005
@@ -50,6 +53,36 @@ LANE_CHANGE_MIN_REAR_GAP_M = 12.0
 LANE_CHANGE_ABORT_FRONT_M = 6.0
 LANE_CHANGE_ABORT_REAR_M = 4.0
 LANE_CHANGE_CONFLICT_WINDOW_M = 18.0
+
+# Real-time driving grade ---------------------------------------------------
+# The ego is scored every step like a driving instructor riding along:
+# lane discipline, speed compliance, following distance, merge courtesy,
+# and physical clearances all feed both the reward and a rolling report
+# card (0-100, mapped to letter grades for the dashboard).
+CONTACT_EPSILON_M = 0.05          # any physical touch counts as a crash
+SPEEDING_GRACE_MPS = 1.0          # ~2 mph of real-world enforcement grace
+DIVIDER_CROSSING_SPEED_MPS = 0.6  # lateral speed marking a deliberate crossing
+CUT_OFF_SETTLE_STEPS = 20         # post-merge window judged for courtesy
+NEAR_MISS_LONG_M = 2.0            # bumper clearance considered a close call
+NEAR_MISS_LAT_M = 0.6             # side clearance considered a close call
+GRADE_EMA_ALPHA = 0.03            # ~3 s rolling window at dt = 0.1 s
+GRADE_PENALTY_SCALE = 5.0         # step penalty that drags a step score to 0
+
+GRADE_BANDS: tuple[tuple[float, str], ...] = (
+    (97.0, "A+"), (93.0, "A"), (90.0, "A-"),
+    (87.0, "B+"), (83.0, "B"), (80.0, "B-"),
+    (77.0, "C+"), (73.0, "C"), (70.0, "C-"),
+    (60.0, "D"),
+)
+
+
+def grade_letter(score: float) -> str:
+    """Map a 0-100 driving score to a report-card letter."""
+
+    for cutoff, letter in GRADE_BANDS:
+        if score >= cutoff:
+            return letter
+    return "F"
 
 
 @dataclass
@@ -157,17 +190,37 @@ class DrivingEnv:
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
-        del options
+        randomize_start = bool(options and options.get("randomize_start"))
         if seed is not None:
             self.rng = np.random.default_rng(seed)
 
         self.ego_x_m = self.lane_center(self.config.lane_count // 2)
         self.ego_lateral_speed_mps = 0.0
         self.ego_speed_mps = 12.0
+        if randomize_start:
+            # Handover training: an autopilot engages mid-drive, in whatever
+            # state the human hands it — off-center, on a divider, slow or
+            # near the limit, drifting sideways. Starting episodes in such
+            # states teaches the policy to recover from all of them.
+            cfg = self.config
+            margin = cfg.car_width_m / 2.0 + 0.15
+            self.ego_x_m = float(
+                self.rng.uniform(
+                    -cfg.road_half_width_m + margin,
+                    cfg.road_half_width_m - margin,
+                )
+            )
+            self.ego_speed_mps = float(self.rng.uniform(6.0, cfg.speed_limit_mps))
+            self.ego_lateral_speed_mps = float(
+                self.rng.uniform(-0.5, 0.5) * cfg.max_lateral_speed_mps
+            )
         self.distance_m = 0.0
         self.steps = 0
         self.previous_action = Action.MAINTAIN
         self.last_reward_terms = {}
+        self.grade_score = 100.0
+        self._graded_lane = self.current_lane
+        self._cut_off_timer = 0
         self.traffic = []
         if self.scenario == "traffic":
             self._spawn_initial_traffic()
@@ -219,6 +272,16 @@ class DrivingEnv:
         self._recycle_traffic()
 
         self.steps += 1
+
+        # Track completed lane changes: the courtesy grade judges the gap
+        # the ego leaves its new follower for a short window after a merge.
+        lane_now = self.current_lane
+        if lane_now != self._graded_lane:
+            self._graded_lane = lane_now
+            self._cut_off_timer = CUT_OFF_SETTLE_STEPS
+        elif self._cut_off_timer > 0:
+            self._cut_off_timer -= 1
+
         collision = self._has_collision()
         off_road = self._is_off_road()
         terminated = collision or off_road
@@ -350,6 +413,57 @@ class DrivingEnv:
         if edge_fraction > 0.82:
             road_edge = -2.0 * min(1.0, (edge_fraction - 0.82) / 0.18)
 
+        # Lane discipline: a safe driver never rides the divider line.
+        # Crossing briskly during a deliberate lane change is fine (the
+        # lateral-speed gate); lingering on the paint is what gets graded.
+        interior_lines = self.lane_centers_m[:-1] + cfg.lane_width_m / 2.0
+        line_distance = float(np.min(np.abs(interior_lines - self.ego_x_m)))
+        half_width = cfg.car_width_m / 2.0
+        divider_straddle = 0.0
+        if (
+            line_distance < half_width
+            and abs(self.ego_lateral_speed_mps) < DIVIDER_CROSSING_SPEED_MPS
+        ):
+            divider_straddle = -0.8 * (1.0 - line_distance / half_width)
+
+        # Speed compliance: a small real-world grace, then a growing fine.
+        over_limit = self.ego_speed_mps - (cfg.speed_limit_mps + SPEEDING_GRACE_MPS)
+        speeding = 0.0
+        if over_limit > 0.0:
+            over_span = max(
+                0.1, cfg.max_speed_mps - cfg.speed_limit_mps - SPEEDING_GRACE_MPS
+            )
+            speeding = -1.0 * min(1.0, over_limit / over_span)
+
+        # Merge courtesy: for a short window after every completed lane
+        # change, the gap left to the new follower is judged. Squeezing in
+        # front of someone with no room is a cut-off even without contact.
+        cut_off = 0.0
+        if self._cut_off_timer > 0:
+            rear_gap = float(np.asarray(sensors["rear_gaps_m"])[self.current_lane])
+            rear_relative = float(
+                np.asarray(sensors["rear_relative_speeds_mps"])[self.current_lane]
+            )
+            follower_speed = max(0.0, self.ego_speed_mps + rear_relative)
+            needed_gap = max(6.0, 0.8 * follower_speed)
+            if rear_gap < needed_gap:
+                cut_off = -1.5 * (1.0 - rear_gap / needed_gap)
+
+        # Near miss: physical clearance to any car shrinking in both axes
+        # at once — threading a gap with inches to spare is graded down
+        # even when nothing actually touches.
+        near_miss = 0.0
+        for car in self.traffic:
+            longitudinal_clear = abs(car.y_m) - cfg.car_length_m
+            lateral_clear = (
+                abs(self.traffic_x_m(car) - self.ego_x_m) - cfg.car_width_m
+            )
+            if longitudinal_clear < NEAR_MISS_LONG_M and lateral_clear < NEAR_MISS_LAT_M:
+                squeeze = (
+                    1.0 - max(0.0, longitudinal_clear) / NEAR_MISS_LONG_M
+                ) * (1.0 - max(0.0, lateral_clear) / NEAR_MISS_LAT_M)
+                near_miss = min(near_miss, -1.2 * squeeze)
+
         terminal = -500.0 if collision else (-350.0 if off_road else 0.0)
 
         self.last_reward_terms = {
@@ -359,10 +473,33 @@ class DrivingEnv:
             "unsafe_following": unsafe_following,
             "unsafe_lane_change": unsafe_lane_change,
             "road_edge": road_edge,
+            "divider_straddle": divider_straddle,
+            "speeding": speeding,
+            "cut_off": cut_off,
+            "near_miss": near_miss,
             "control_cost": control_cost,
             "living_cost": living_cost,
             "terminal": terminal,
         }
+
+        # Roll the safety terms into the live report card. Crashing or
+        # leaving the road zeroes it; otherwise it tracks a ~3 s window of
+        # how law-abiding and courteous the driving has been.
+        safety_penalty = (
+            unsafe_following
+            + unsafe_lane_change
+            + road_edge
+            + divider_straddle
+            + speeding
+            + cut_off
+            + near_miss
+        )
+        step_score = 100.0 * max(0.0, 1.0 + safety_penalty / GRADE_PENALTY_SCALE)
+        if collision or off_road:
+            self.grade_score = 0.0
+        else:
+            self.grade_score += GRADE_EMA_ALPHA * (step_score - self.grade_score)
+
         return float(sum(self.last_reward_terms.values()))
 
     def _spawn_initial_traffic(self) -> None:
@@ -381,6 +518,8 @@ class DrivingEnv:
                 continue
             cruise = self._sample_legal_speed()
             speed = self._entry_speed(lane, y_m, cruise)
+            if not self._entry_rear_ok(lane, y_m, speed):
+                continue
             color_index = int(self.rng.integers(0, 6))
             behavior = "cruiser"
             if reactive_fraction > 0.0 and self.rng.random() < reactive_fraction:
@@ -476,10 +615,13 @@ class DrivingEnv:
                 if not self._spawn_gap_ok(lane, y_m, ignore=car):
                     continue
                 cruise = self._sample_legal_speed()
+                entry = self._entry_speed(lane, y_m, cruise, ignore=car)
+                if not self._entry_rear_ok(lane, y_m, entry, ignore=car):
+                    continue
                 car.lane = lane
                 car.y_m = y_m
                 car.cruise_speed_mps = cruise
-                car.speed_mps = self._entry_speed(lane, y_m, cruise, ignore=car)
+                car.speed_mps = entry
                 car.color_index = int(self.rng.integers(0, 6))
                 car.target_lane = None
                 car.lane_change_progress = 0.0
@@ -498,6 +640,42 @@ class DrivingEnv:
             and abs(car.y_m - y_m) < 24.0
             for car in self.traffic
         )
+
+    def _entry_rear_ok(
+        self,
+        lane: int,
+        y_m: float,
+        entry_speed: float,
+        *,
+        ignore: TrafficCar | None = None,
+    ) -> bool:
+        """True when every follower can absorb this merge with normal braking.
+
+        A car may never enter the flow in front of a follower whose closing
+        speed cannot be shed at the comfortable braking rate within the gap
+        left over — that would force an emergency stop (or a rear-end) the
+        entering driver caused. The ego also counts as a follower.
+        """
+
+        cfg = self.config
+        for other in self.traffic:
+            if other is ignore or other.behavior == "obstacle":
+                continue
+            if lane in self._occupied_lanes(other) and other.y_m < y_m:
+                gap = y_m - other.y_m - cfg.car_length_m
+                closing = max(0.0, other.speed_mps - entry_speed)
+                needed = (
+                    REACTIVE_MIN_GAP_M + closing**2 / (2.0 * REACTIVE_BRAKE_MPS2)
+                )
+                if gap < needed:
+                    return False
+        if lane == self.current_lane and y_m > 0.0:
+            gap = y_m - cfg.car_length_m
+            closing = max(0.0, self.ego_speed_mps - entry_speed)
+            needed = REACTIVE_MIN_GAP_M + closing**2 / (2.0 * cfg.braking_mps2)
+            if gap < needed:
+                return False
+        return True
 
     def _entry_speed(
         self,
@@ -528,8 +706,15 @@ class DrivingEnv:
                     leader_speed = other.speed_mps
         if not np.isfinite(gap):
             return sampled
+        # Pessimistic: assume the leader might be braking to a dead stop
+        # (a shockwave in the queue). The entering car must be able to stop
+        # at a comfortable rate before the point where the leader would
+        # halt, so no entry speed ever relies on the flow staying fast.
         stopping_gap = max(gap - REACTIVE_MIN_GAP_M, 0.0)
-        safe_speed = leader_speed + np.sqrt(2.0 * REACTIVE_BRAKE_MPS2 * stopping_gap)
+        leader_stop_distance = leader_speed**2 / (2.0 * REACTIVE_EMERGENCY_BRAKE_MPS2)
+        safe_speed = np.sqrt(
+            2.0 * REACTIVE_BRAKE_MPS2 * (stopping_gap + leader_stop_distance)
+        )
         return float(min(sampled, safe_speed))
 
     def _sample_legal_speed(self) -> float:
@@ -734,15 +919,22 @@ class DrivingEnv:
         behind to brake hard.
         """
 
-        front_gap, _ = self._front_gap_for(car, candidate)
+        front_gap, leader_speed = self._front_gap_for(car, candidate)
         rear_gap, follower_speed = self._rear_gap_for(car, candidate)
         rear_closing = max(0.0, follower_speed - car.speed_mps)
-        required_rear_gap = (
-            LANE_CHANGE_MIN_REAR_GAP_M + REACTIVE_TIME_HEADWAY_S * rear_closing
+        # The follower must be able to absorb the merge at a comfortable
+        # braking rate — a time-headway margin alone is too thin at highway
+        # closing speeds.
+        required_rear_gap = LANE_CHANGE_MIN_REAR_GAP_M + rear_closing**2 / (
+            2.0 * REACTIVE_BRAKE_MPS2
+        )
+        front_closing = max(0.0, car.speed_mps - leader_speed)
+        required_front_gap = LANE_CHANGE_MIN_FRONT_GAP_M + front_closing**2 / (
+            2.0 * REACTIVE_BRAKE_MPS2
         )
         return (
             front_gap > current_gap
-            and front_gap >= LANE_CHANGE_MIN_FRONT_GAP_M
+            and front_gap >= required_front_gap
             and rear_gap >= required_rear_gap
         )
 
@@ -768,11 +960,17 @@ class DrivingEnv:
         return max(0.0, gap), follower_speed
 
     def _has_collision(self) -> bool:
+        # Touch-inclusive: even a slight brush against another car's bumper
+        # or door panel counts as a crash, exactly like a rear-end. A merge
+        # only "works" if the ego never makes contact with the cars that
+        # frame the gap.
         cfg = self.config
         for car in self.traffic:
             car_x = self.traffic_x_m(car)
-            longitudinal_overlap = abs(car.y_m) < cfg.car_length_m
-            lateral_overlap = abs(car_x - self.ego_x_m) < cfg.car_width_m
+            longitudinal_overlap = abs(car.y_m) <= cfg.car_length_m + CONTACT_EPSILON_M
+            lateral_overlap = (
+                abs(car_x - self.ego_x_m) <= cfg.car_width_m + CONTACT_EPSILON_M
+            )
             if longitudinal_overlap and lateral_overlap:
                 return True
         return False
@@ -787,6 +985,8 @@ class DrivingEnv:
         return {
             "collision": collision,
             "off_road": off_road,
+            "driving_grade": float(self.grade_score),
+            "grade_letter": grade_letter(self.grade_score),
             "distance_m": self.distance_m,
             "speed_mps": self.ego_speed_mps,
             "speed_mph": self.ego_speed_mps * 2.236936,

@@ -10,7 +10,7 @@ from .environment import Action, DrivingEnv
 class HeuristicDriver:
     """Keep speed, change lanes around slow traffic, and avoid nearby cars."""
 
-    def __init__(self, target_speed_mps: float = 23.0) -> None:
+    def __init__(self, target_speed_mps: float = 27.0) -> None:
         self.target_speed_mps = target_speed_mps
         self.target_lane: int | None = None
 
@@ -52,4 +52,3 @@ class HeuristicDriver:
         if env.ego_speed_mps < self.target_speed_mps:
             return int(Action.ACCELERATE)
         return int(Action.MAINTAIN)
-
