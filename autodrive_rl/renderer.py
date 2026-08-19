@@ -5,12 +5,16 @@ Visual design notes
 The scene uses a layered, modern semi-realistic style drawn entirely with
 Tkinter canvas primitives:
 
-- Cars are composite sprites: a soft drop shadow, wheels tucked under the
-  body, a spline-smoothed silhouette, tinted glass with a highlight, side
-  mirrors, and head/tail lights. The ego car wears the accent blue and a
-  halo ring so the eye finds it instantly.
-- Sprites are drawn close to their physical proportions so two cars that
-  look close on screen really are close in the simulation.
+- Cars are composite sprites: a soft drop shadow, tires tucked under the
+  fenders, a crisp straight-sided sedan silhouette with chamfered corners,
+  hood and trunk panels, tinted glass with a highlight, side mirrors, and
+  wide light bars. The ego car wears the accent blue and a halo ring so
+  the eye finds it instantly.
+- Cars are drawn near true-to-scale lane fill (a real car is about half a
+  lane wide), with a closer camera so the traffic feels substantial. A
+  dashed footprint box under each car marks the exact rectangle the
+  physics uses for collisions, so what you see is what the crash check
+  sees.
 - The road is built from layers (verge, guardrail, shoulder, asphalt,
   edge lines, scrolling lane dashes and asphalt speckle) to create motion
   and depth without hurting the frame rate.
@@ -20,13 +24,14 @@ Tkinter canvas primitives:
 
 from __future__ import annotations
 
+import math
 import time
 import tkinter as tk
 from typing import Any
 
 import numpy as np
 
-from .environment import ACTION_NAMES, Action, DrivingEnv
+from .environment import ACTION_NAMES, Action, DrivingEnv, grade_letter
 
 # Palette ------------------------------------------------------------------
 BG = "#0b1017"
@@ -62,23 +67,27 @@ class TopDownRenderer:
 
     width = 1000
     height = 720
-    road_left = 65
-    road_right = 600
+    road_left = 110
+    road_right = 470
     ego_screen_y = 560
-    longitudinal_scale = 5.5
+    longitudinal_scale = 13.0
 
     traffic_colors = TRAFFIC_COLORS
 
-    # Kept close to physical proportions relative to the longitudinal
-    # scale, so cars that look close on screen really are close.
-    CAR_HALF_W = 16
-    CAR_HALF_L = 24
+    # Honest proportions: sprite width is the car's true share of the lane
+    # (1.9 m of 3.7 m), and sprite length exceeds the physical car by only
+    # ~1.2 m of road — so two sprites visually touch just as the physics is
+    # about to call the crash. The dashed footprint box marks the exact
+    # collision rectangle.
+    CAR_HALF_W = 30
+    CAR_HALF_L = 38
 
     def __init__(self, *, fps: int = 30, title: str = "AutoDrive RL Lab") -> None:
         self.fps = max(1, fps)
         self.closed = False
         self.paused = False
         self.reset_requested = False
+        self.autopilot_toggle_requested = False
         self.keys_down: set[str] = set()
         self.last_frame_time = time.perf_counter()
 
@@ -111,6 +120,8 @@ class TopDownRenderer:
             self.paused = not self.paused
         elif key == "r":
             self.reset_requested = True
+        elif key == "space":
+            self.autopilot_toggle_requested = True
 
     def _on_key_release(self, event: tk.Event[Any]) -> None:
         self.keys_down.discard(str(event.keysym).lower())
@@ -136,6 +147,20 @@ class TopDownRenderer:
         return int(Action.MAINTAIN)
 
     # Drawing helpers ------------------------------------------------------
+
+    @staticmethod
+    def _grade_color(score: float) -> str:
+        """Report-card color: green for honor roll, red for flunking."""
+
+        if score >= 90.0:
+            return "#57cc99"
+        if score >= 80.0:
+            return "#a7c957"
+        if score >= 70.0:
+            return "#e9c46a"
+        if score >= 60.0:
+            return "#f4a261"
+        return "#e5383b"
 
     @staticmethod
     def _shade(color: str, factor: float) -> str:
@@ -174,11 +199,16 @@ class TopDownRenderer:
         episode_reward: float,
         epsilon: float | None = None,
         message: str | None = None,
+        autopilot: str | None = None,
+        q_values: np.ndarray | None = None,
     ) -> None:
         if self.closed:
             return
         self.canvas.delete("all")
         self._draw_world(env)
+        self._draw_autopilot_chip(autopilot)
+        if q_values is not None:
+            self._draw_q_panel(np.asarray(q_values, dtype=float), action)
         self._draw_dashboard(
             env,
             policy_name=policy_name,
@@ -200,16 +230,17 @@ class TopDownRenderer:
         scroll = env.distance_m * self.longitudinal_scale
 
         # Grass verge with scrolling mow bands for a sense of motion.
+        scene_right = 620
         canvas.create_rectangle(0, 0, self.road_left, self.height, fill=VERGE, outline="")
         canvas.create_rectangle(
-            self.road_right, 0, self.road_right + 20, self.height, fill=VERGE, outline=""
+            self.road_right, 0, scene_right, self.height, fill=VERGE, outline=""
         )
         band_offset = scroll % 96.0
         y = -96.0 + band_offset
         while y < self.height:
             canvas.create_rectangle(0, y, self.road_left, y + 34, fill=VERGE_BAND, outline="")
             canvas.create_rectangle(
-                self.road_right, y, self.road_right + 20, y + 34, fill=VERGE_BAND, outline=""
+                self.road_right, y, scene_right, y + 34, fill=VERGE_BAND, outline=""
             )
             y += 96.0
 
@@ -271,21 +302,29 @@ class TopDownRenderer:
 
         self._draw_sensors(env)
 
+        # True collision-rectangle extents in pixels, from the physics.
+        lat_scale = (self.road_right - self.road_left) / env.config.road_width_m
+        foot_hw = env.config.car_width_m / 2.0 * lat_scale
+        foot_hl = env.config.car_length_m / 2.0 * self.longitudinal_scale
+
         visible_cars = sorted(env.traffic, key=lambda car: car.y_m, reverse=True)
         for car in visible_cars:
             screen_y = self.ego_screen_y - car.y_m * self.longitudinal_scale
-            if -70 <= screen_y <= self.height + 70:
+            if -140 <= screen_y <= self.height + 140:
                 x = self._world_x_to_screen(env, env.traffic_x_m(car))
                 if car.behavior == "obstacle":
                     self._draw_obstacle(x, screen_y)
+                    self._draw_footprint(x, screen_y, foot_hw, foot_hl)
                     continue
                 color = self.traffic_colors[car.color_index % len(self.traffic_colors)]
                 self._draw_car(
                     x, screen_y, color, label=f"{car.speed_mps * 2.236936:.0f}"
                 )
+                self._draw_footprint(x, screen_y, foot_hw, foot_hl)
 
         ego_x = self._world_x_to_screen(env, env.ego_x_m)
         self._draw_car(ego_x, self.ego_screen_y, EGO_BODY, label="AI", ego=True)
+        self._draw_footprint(ego_x, self.ego_screen_y, foot_hw, foot_hl)
 
         # Sensor legend chip.
         self._rounded_rect(
@@ -339,20 +378,43 @@ class TopDownRenderer:
 
     # Sprites --------------------------------------------------------------
 
+    def _draw_footprint(self, x: float, y: float, hw: float, hl: float) -> None:
+        """Corner brackets marking the exact rectangle the physics crashes on."""
+
+        color = "#f4a6b0"
+        arm = 7.0
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                corner_x, corner_y = x + sx * hw, y + sy * hl
+                self.canvas.create_line(
+                    corner_x, corner_y, corner_x - sx * arm, corner_y,
+                    fill=color, width=2,
+                )
+                self.canvas.create_line(
+                    corner_x, corner_y, corner_x, corner_y - sy * arm,
+                    fill=color, width=2,
+                )
+
     def _car_silhouette(self, x: float, y: float, hw: float, hl: float) -> list[float]:
-        """Spline control points for a sedan seen from above, nose up."""
+        """Vertices for a crisp top-down sedan, nose pointing up.
+
+        Straight parallel sides with chamfered fender corners — drawn
+        unsmoothed so the body reads as sheet metal, not a beetle shell.
+        """
 
         return [
-            x, y - hl,                     # nose center
-            x + hw * 0.62, y - hl + 2,     # nose corner
-            x + hw, y - hl * 0.42,         # front shoulder
-            x + hw, y + hl * 0.34,         # rear haunch
-            x + hw * 0.78, y + hl - 2,     # tail corner
-            x, y + hl,                     # tail center
-            x - hw * 0.78, y + hl - 2,
-            x - hw, y + hl * 0.34,
-            x - hw, y - hl * 0.42,
-            x - hw * 0.62, y - hl + 2,
+            x - hw * 0.58, y - hl,           # front bumper, left edge
+            x + hw * 0.58, y - hl,           # front bumper, right edge
+            x + hw * 0.90, y - hl * 0.82,    # right front fender chamfer
+            x + hw, y - hl * 0.52,           # right side begins
+            x + hw, y + hl * 0.60,           # right side ends (straight)
+            x + hw * 0.92, y + hl * 0.86,    # right rear fender chamfer
+            x + hw * 0.62, y + hl,           # rear bumper, right edge
+            x - hw * 0.62, y + hl,           # rear bumper, left edge
+            x - hw * 0.92, y + hl * 0.86,
+            x - hw, y + hl * 0.60,
+            x - hw, y - hl * 0.52,
+            x - hw * 0.90, y - hl * 0.82,
         ]
 
     def _draw_car(
@@ -369,9 +431,7 @@ class TopDownRenderer:
 
         # Drop shadow, offset toward the lower-right light direction.
         canvas.create_polygon(
-            self._car_silhouette(x + 3, y + 5, hw, hl),
-            smooth=True,
-            splinesteps=12,
+            self._car_silhouette(x + 4, y + 6, hw, hl),
             fill="#000000",
             stipple="gray50",
             outline="",
@@ -380,94 +440,115 @@ class TopDownRenderer:
         # Halo ring makes the learning agent easy to track.
         if ego:
             self._rounded_rect(
-                x - hw - 6, y - hl - 6, x + hw + 6, y + hl + 6, 14,
+                x - hw - 7, y - hl - 7, x + hw + 7, y + hl + 7, 16,
                 fill="", outline=EGO_HALO, width=2,
             )
 
-        # Wheels peeking from under the body.
-        for wheel_y in (y - hl * 0.52, y + hl * 0.40):
+        # Tires, mostly tucked under the fenders.
+        for wheel_y in (y - hl * 0.62, y + hl * 0.38):
             for side in (-1, 1):
-                wheel_x = x + side * hw
+                wheel_x = x + side * (hw - 1)
                 canvas.create_rectangle(
-                    wheel_x - 4, wheel_y, wheel_x + 4, wheel_y + 13,
+                    wheel_x - 4, wheel_y, wheel_x + 4, wheel_y + 18,
                     fill=TIRE, outline="",
                 )
 
-        # Body.
+        # Body: crisp, straight-sided sedan.
         canvas.create_polygon(
             self._car_silhouette(x, y, hw, hl),
-            smooth=True,
-            splinesteps=12,
             fill=color,
-            outline=self._shade(color, 0.5),
+            outline=self._shade(color, 0.45),
             width=1,
         )
 
-        # Hood sheen.
+        # Front bumper trim.
+        canvas.create_line(
+            x - hw * 0.52, y - hl + 3, x + hw * 0.52, y - hl + 3,
+            fill=self._shade(color, 0.7), width=2,
+        )
+
+        # Hood panel with crease lines.
         canvas.create_polygon(
             [
-                x, y - hl + 5,
-                x + hw * 0.34, y - hl * 0.5,
-                x, y - hl * 0.3,
-                x - hw * 0.34, y - hl * 0.5,
+                x - hw * 0.70, y - hl * 0.76,
+                x + hw * 0.70, y - hl * 0.76,
+                x + hw * 0.80, y - hl * 0.40,
+                x - hw * 0.80, y - hl * 0.40,
             ],
-            smooth=True,
-            fill=self._shade(color, 1.18),
+            fill=self._shade(color, 1.12),
             outline="",
         )
+        for side in (-1, 1):
+            canvas.create_line(
+                x + side * hw * 0.42, y - hl * 0.74,
+                x + side * hw * 0.52, y - hl * 0.42,
+                fill=self._shade(color, 0.85), width=1,
+            )
 
         # Windshield.
         canvas.create_polygon(
             [
-                x - hw * 0.64, y - hl * 0.34,
-                x + hw * 0.64, y - hl * 0.34,
-                x + hw * 0.52, y - hl * 0.02,
-                x - hw * 0.52, y - hl * 0.02,
+                x - hw * 0.80, y - hl * 0.38,
+                x + hw * 0.80, y - hl * 0.38,
+                x + hw * 0.68, y - hl * 0.08,
+                x - hw * 0.68, y - hl * 0.08,
             ],
             fill=GLASS,
             outline=GLASS_EDGE,
         )
         canvas.create_line(
-            x - hw * 0.52, y - hl * 0.27, x + hw * 0.52, y - hl * 0.27,
+            x - hw * 0.70, y - hl * 0.30, x + hw * 0.70, y - hl * 0.30,
             fill=GLASS_SHINE, width=1,
         )
 
-        # Roof panel.
+        # Roof.
         self._rounded_rect(
-            x - hw * 0.58, y - hl * 0.02, x + hw * 0.58, y + hl * 0.42, 6,
-            fill=self._shade(color, 0.9), outline="",
+            x - hw * 0.72, y - hl * 0.08, x + hw * 0.72, y + hl * 0.30, 7,
+            fill=self._shade(color, 0.90), outline="",
         )
 
         # Rear window.
         canvas.create_polygon(
             [
-                x - hw * 0.50, y + hl * 0.44,
-                x + hw * 0.50, y + hl * 0.44,
-                x + hw * 0.58, y + hl * 0.64,
-                x - hw * 0.58, y + hl * 0.64,
+                x - hw * 0.66, y + hl * 0.32,
+                x + hw * 0.66, y + hl * 0.32,
+                x + hw * 0.76, y + hl * 0.54,
+                x - hw * 0.76, y + hl * 0.54,
             ],
             fill=GLASS,
             outline=GLASS_EDGE,
         )
 
+        # Trunk lid.
+        canvas.create_polygon(
+            [
+                x - hw * 0.78, y + hl * 0.58,
+                x + hw * 0.78, y + hl * 0.58,
+                x + hw * 0.70, y + hl * 0.90,
+                x - hw * 0.70, y + hl * 0.90,
+            ],
+            fill=self._shade(color, 1.06),
+            outline="",
+        )
+
         # Side mirrors.
         for side in (-1, 1):
             canvas.create_rectangle(
-                x + side * (hw + 1), y - hl * 0.30,
-                x + side * (hw + 5), y - hl * 0.30 + 5,
+                x + side * (hw + 1), y - hl * 0.34,
+                x + side * (hw + 6), y - hl * 0.34 + 6,
                 fill=self._shade(color, 0.75), outline="",
             )
 
-        # Headlights and taillights, tucked just inside the body curve.
+        # Wide light bars: headlights up front, tail bars in back.
         for side in (-1, 1):
-            canvas.create_oval(
-                x + side * hw * 0.45 - 3, y - hl + 3,
-                x + side * hw * 0.45 + 3, y - hl + 8,
+            self._rounded_rect(
+                x + side * hw * 0.42 - hw * 0.20, y - hl + 4,
+                x + side * hw * 0.42 + hw * 0.20, y - hl + 9, 3,
                 fill=HEADLIGHT, outline="",
             )
-            canvas.create_rectangle(
-                x + side * hw * 0.55 - 5, y + hl - 6,
-                x + side * hw * 0.55 + 5, y + hl - 3,
+            self._rounded_rect(
+                x + side * hw * 0.55 - hw * 0.25, y + hl - 9,
+                x + side * hw * 0.55 + hw * 0.25, y + hl - 4, 2,
                 fill=TAILLIGHT, outline="",
             )
 
@@ -484,11 +565,11 @@ class TopDownRenderer:
 
     def _draw_obstacle(self, x: float, y: float) -> None:
         canvas = self.canvas
-        hw, hl = 24.0, 12.0
+        hw, hl = 40.0, 16.0
         canvas.create_polygon(
             [
-                x - hw + 3, y - hl + 5, x + hw + 3, y - hl + 5,
-                x + hw + 3, y + hl + 5, x - hw + 3, y + hl + 5,
+                x - hw + 4, y - hl + 6, x + hw + 4, y - hl + 6,
+                x + hw + 4, y + hl + 6, x - hw + 4, y + hl + 6,
             ],
             fill="#000000", stipple="gray50", outline="",
         )
@@ -497,9 +578,9 @@ class TopDownRenderer:
             x - hw, y - hl, x + hw, y + hl, 5,
             fill="#f77f00", outline="#8a4a03", width=1,
         )
-        stripe = 12
-        inner_left = x - hw + 5
-        inner_right = x + hw - 5
+        stripe = 14
+        inner_left = x - hw + 6
+        inner_right = x + hw - 6
         sx = inner_left
         toggle = True
         while sx < inner_right:
@@ -507,7 +588,7 @@ class TopDownRenderer:
             if toggle:
                 canvas.create_polygon(
                     sx, y + hl - 5, end, y - hl + 5,
-                    min(end + 6, inner_right), y - hl + 5, min(sx + 6, inner_right), y + hl - 5,
+                    min(end + 7, inner_right), y - hl + 5, min(sx + 7, inner_right), y + hl - 5,
                     fill="#f4f1de", outline="",
                 )
             toggle = not toggle
@@ -515,9 +596,88 @@ class TopDownRenderer:
         # End posts.
         for side in (-1, 1):
             canvas.create_rectangle(
-                x + side * hw - 3, y - hl - 4, x + side * hw + 3, y + hl + 4,
+                x + side * hw - 3, y - hl - 5, x + side * hw + 3, y + hl + 5,
                 fill="#3a434d", outline="",
             )
+
+    def _draw_autopilot_chip(self, autopilot: str | None) -> None:
+        """Status chip for the manual-mode autopilot (SPACE to toggle)."""
+
+        if autopilot is None:
+            return
+        road_cx = (self.road_left + self.road_right) / 2.0
+        if autopilot == "on":
+            text, color = "AUTOPILOT ENGAGED", "#57cc99"
+        elif autopilot == "missing":
+            text, color = "NO AUTOPILOT MODEL - TRAIN WITH --handover", "#e5383b"
+        else:
+            text, color = "SPACE - AUTOPILOT", "#44586a"
+        chip_w = 18 + 7.2 * len(text)
+        self._rounded_rect(
+            road_cx - chip_w / 2, 44, road_cx + chip_w / 2, 68, 11,
+            fill=PANEL_BG, outline=color, width=2 if autopilot == "on" else 1,
+        )
+        self.canvas.create_text(
+            road_cx, 56, text=text,
+            fill=color if autopilot != "off" else TEXT_DIM,
+            font=("Arial", 9, "bold"),
+        )
+
+    def _draw_q_panel(self, q_values: np.ndarray, action: int) -> None:
+        """Live window into the value function: one bar per action.
+
+        Bar lengths are min-max normalized within the current frame (Q-values
+        are only meaningful relative to each other), so the longest bar is
+        always the action the network likes most right now.
+        """
+
+        labels = ("MAINTAIN", "ACCEL", "BRAKE", "LEFT", "RIGHT")
+        panel_left, panel_right = 8, 102
+        panel_top = 464
+        row_height = 38
+        panel_bottom = panel_top + 34 + row_height * len(labels)
+        self._rounded_rect(
+            panel_left, panel_top, panel_right, panel_bottom, 10,
+            fill=PANEL_BG, outline=CARD_EDGE,
+        )
+        self.canvas.create_text(
+            (panel_left + panel_right) / 2, panel_top + 15,
+            text="Q-VALUES", fill="#7fb3c8", font=("Arial", 8, "bold"),
+        )
+        low = float(np.min(q_values))
+        span = float(np.max(q_values) - low)
+        best = int(np.argmax(q_values))
+        bar_left = panel_left + 8
+        bar_max = panel_right - 8 - bar_left
+        y = panel_top + 30
+        for index, label in enumerate(labels):
+            is_best = index == best
+            is_chosen = index == int(action)
+            name_color = ACCENT if is_best else TEXT_DIM
+            self.canvas.create_text(
+                bar_left, y + 6, text=label, anchor="w",
+                fill=name_color, font=("Arial", 8, "bold"),
+            )
+            self.canvas.create_text(
+                panel_right - 8, y + 6, text=f"{q_values[index]:.1f}", anchor="e",
+                fill=TEXT_MAIN if is_best else TEXT_DIM, font=("Arial", 7),
+            )
+            fraction = (float(q_values[index]) - low) / span if span > 1e-9 else 0.5
+            fill_w = 4 + fraction * (bar_max - 4)
+            self._rounded_rect(
+                bar_left, y + 14, bar_left + bar_max, y + 24, 5,
+                fill=CARD_BG, outline="",
+            )
+            self._rounded_rect(
+                bar_left, y + 14, bar_left + fill_w, y + 24, 5,
+                fill=ACCENT_DEEP if is_best else "#33566b", outline="",
+            )
+            if is_chosen:
+                self._rounded_rect(
+                    bar_left - 3, y + 11, bar_left + bar_max + 3, y + 27, 7,
+                    fill="", outline=ACCENT, width=1,
+                )
+            y += row_height
 
     # Dashboard ------------------------------------------------------------
 
@@ -572,6 +732,42 @@ class TopDownRenderer:
         canvas.create_text(
             gauge_cx, gauge_cy + 22, text="mph", fill=TEXT_DIM, font=("Arial", 10, "bold")
         )
+        # Red tick marking the posted speed limit on the gauge.
+        limit_fraction = min(1.0, env.config.speed_limit_mps / env.config.max_speed_mps)
+        limit_angle = math.radians(210.0 - 240.0 * limit_fraction)
+        cos_a, sin_a = math.cos(limit_angle), math.sin(limit_angle)
+        canvas.create_line(
+            gauge_cx + (gauge_r - 9) * cos_a, gauge_cy - (gauge_r - 9) * sin_a,
+            gauge_cx + (gauge_r + 8) * cos_a, gauge_cy - (gauge_r + 8) * sin_a,
+            fill=TAILLIGHT, width=3,
+        )
+
+        card_w, card_h, gap = 172, 50, 10
+
+        # Live driver's report card: letter grade plus rolling score.
+        score = float(getattr(env, "grade_score", 100.0))
+        letter = grade_letter(score)
+        grade_color = self._grade_color(score)
+        banner_w = 2 * card_w + gap
+        self._rounded_rect(
+            left, 240, left + banner_w, 292, 10, fill=CARD_BG, outline=grade_color
+        )
+        canvas.create_text(
+            left + 38, 266, text=letter, fill=grade_color, font=("Arial", 26, "bold")
+        )
+        canvas.create_text(
+            left + 76, 256, text="DRIVER GRADE", anchor="w", fill=TEXT_DIM,
+            font=("Arial", 8, "bold"),
+        )
+        bar_left, bar_right = left + 76, left + banner_w - 62
+        self._rounded_rect(bar_left, 268, bar_right, 280, 6, fill="#1a2530", outline="")
+        fill_end = bar_left + (score / 100.0) * (bar_right - bar_left)
+        if fill_end > bar_left + 6:
+            self._rounded_rect(bar_left, 268, fill_end, 280, 6, fill=grade_color, outline="")
+        canvas.create_text(
+            left + banner_w - 14, 274, text=f"{score:3.0f}", anchor="e",
+            fill=TEXT_MAIN, font=("Arial", 12, "bold"),
+        )
 
         # Metric cards, two columns.
         metrics = [
@@ -582,8 +778,7 @@ class TopDownRenderer:
             ("EPISODE", str(episode)),
             ("RETURN", f"{episode_reward:,.1f}"),
         ]
-        card_w, card_h, gap = 172, 50, 10
-        top = 246
+        top = 306
         for index, (label, value) in enumerate(metrics):
             column = index % 2
             row = index // 2
@@ -666,7 +861,7 @@ class TopDownRenderer:
         canvas.create_rectangle(
             0, 0, self.width, self.height, fill="#000000", stipple="gray50", outline=""
         )
-        cx, cy = 332, 348
+        cx, cy = (self.road_left + self.road_right) / 2.0, 348
         head = canvas.create_text(
             cx, cy - 18, text=heading, fill=TEXT_MAIN, font=("Arial", 20, "bold")
         )
