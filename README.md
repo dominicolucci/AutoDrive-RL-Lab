@@ -17,6 +17,9 @@ This is a learning simulation, not software for controlling a real vehicle.
 - Random, manual, rule-based, and learned-agent driving modes
 - Curriculum training: lane keeping, then light traffic, then full traffic
 - CSV training metrics and separate deterministic evaluation episodes
+- A desktop launcher: every mode as a form, with live output and a Stop button
+- Behavior cloning from recorded human driving, and a benchmark harness that
+  scores any policy on identical held-out worlds by difficulty
 - Automated tests for the environment, replay buffer, network, and model files
 
 ## Quick start
@@ -45,11 +48,20 @@ Install the Python dependencies (NumPy for the simulation, MLflow for experiment
 python -m pip install -r requirements.txt
 ```
 
-Open an immediate visual demonstration driven by a rule-based policy:
+Open the launcher:
 
 ```bash
 python -m autodrive_rl
 ```
+
+Everything the project can do is a form in that window — drive the simulation,
+train an agent, clone your own driving, benchmark policies against each other.
+Pick settings, press Run, watch the output stream in. The command being run is
+shown above the button, so the interface teaches the command line rather than
+hiding it, and every flag below is still available directly in a terminal.
+
+On a machine with no display the launcher steps aside and runs the rule-based
+visual demo instead.
 
 The visualizer uses Python's built-in Tkinter desktop toolkit. Python installers
 from python.org normally include it. On some Linux systems, it is a separate
@@ -208,6 +220,9 @@ step to inspect the exact breakdown.
 | `autodrive_rl/play.py` | Manual, random, heuristic, and DQN playback |
 | `autodrive_rl/heuristic.py` | Rule-based comparison policy |
 | `autodrive_rl/benchmark.py` | Score any policy on held-out worlds; emits a reproducible table |
+| `autodrive_rl/launcher.py` | Desktop launcher — every mode as a form |
+| `autodrive_rl/commands.py` | Turns launcher settings into command-line arguments |
+| `autodrive_rl/jobrunner.py` | Runs a command as a subprocess and streams its output |
 | `tests/` | Behavioral and learning-component tests |
 | `LEARNING_GUIDE.md` | Guided walkthrough and suggested experiments |
 | `BENCHMARK.md` | Held-out results (historical — regenerate with `autodrive_rl.benchmark`) |
