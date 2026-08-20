@@ -207,9 +207,10 @@ step to inspect the exact breakdown.
 | `autodrive_rl/renderer.py` | Live top-down desktop visualization |
 | `autodrive_rl/play.py` | Manual, random, heuristic, and DQN playback |
 | `autodrive_rl/heuristic.py` | Rule-based comparison policy |
+| `autodrive_rl/benchmark.py` | Score any policy on held-out worlds; emits a reproducible table |
 | `tests/` | Behavioral and learning-component tests |
 | `LEARNING_GUIDE.md` | Guided walkthrough and suggested experiments |
-| `BENCHMARK.md` | Held-out results for the included trained checkpoints |
+| `BENCHMARK.md` | Held-out results (historical — regenerate with `autodrive_rl.benchmark`) |
 
 ## Run verification
 

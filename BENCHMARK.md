@@ -1,5 +1,26 @@
 # Included Training Benchmark
 
+> **These numbers are historical.** They were measured before the traffic model
+> gained physics-based following, speed limits, gap-aware merging and obstacles,
+> so they describe an environment this repository no longer simulates. They are
+> kept for continuity, not as a current claim.
+>
+> Regenerate current, reproducible results for any policy with:
+>
+> ```bash
+> python -m autodrive_rl.benchmark \
+>   --policy models/autodrive_dqn_best.npz \
+>   --policy models/clone.npz \
+>   --policy heuristic \
+>   --policy random \
+>   --episodes 100 --markdown
+> ```
+>
+> That reports every policy on identical held-out worlds, broken out by
+> difficulty cell, with collision and off-road rates alongside the safe-completion
+> rate — the table below reports safe completion alone, which hides *how* a
+> policy stays safe.
+
 The included checkpoints were produced by a 400-episode curriculum run:
 
 ```bash
