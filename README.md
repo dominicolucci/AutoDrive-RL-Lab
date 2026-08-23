@@ -225,6 +225,7 @@ step to inspect the exact breakdown.
 | `autodrive_rl/jobrunner.py` | Runs a command as a subprocess and streams its output |
 | `tests/` | Behavioral and learning-component tests |
 | `LEARNING_GUIDE.md` | Guided walkthrough and suggested experiments |
+| `docs/LAB_NOTES.md` | Running log of findings, surprises, and open questions |
 | `BENCHMARK.md` | Held-out results (historical — regenerate with `autodrive_rl.benchmark`) |
 
 ## Run verification
