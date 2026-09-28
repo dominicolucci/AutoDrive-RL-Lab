@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from autodrive_rl.commands import (
+    BENCHMARK_CELL_CHOICES,
     BENCHMARK_CELLS,
     Assets,
     build_args,
@@ -138,6 +139,18 @@ def test_benchmark_only_names_cells_when_a_subset_is_chosen():
     subset = build_benchmark_args({"policies": ["random"], "cells": ["dense"]})
     assert "--cells" not in full
     assert subset[-2:] == ["--cells", "dense"]
+
+
+def test_unforgiving_is_offered_but_off_by_default():
+    """It has to be reachable without editing a command line, and it has to be
+    off unless asked for — `BENCHMARK_current.md` is the other three cells, and
+    a silently widened default would make the next run incomparable."""
+    assert "unforgiving" in BENCHMARK_CELL_CHOICES
+    assert "unforgiving" not in BENCHMARK_CELLS
+    args = build_benchmark_args(
+        {"policies": ["random"], "cells": list(BENCHMARK_CELL_CHOICES)}
+    )
+    assert args[-5:] == ["--cells", "sparse", "normal", "dense", "unforgiving"]
 
 
 def test_benchmark_markdown_and_output():

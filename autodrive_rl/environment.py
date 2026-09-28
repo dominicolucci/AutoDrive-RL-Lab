@@ -7,7 +7,7 @@ action, transition, reward, replay, and policy improvement.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
@@ -36,6 +36,14 @@ ACTION_NAMES = {
 
 OBSTACLE_WINDOW_M = 30.0
 OBSTACLE_EGO_CLEAR_M = 60.0
+
+# Rear traffic ---------------------------------------------------------------
+# Without these, every car spawns ahead of the ego and braking to a halt makes
+# the whole world drive away — which is exactly how a safety-only score gets
+# won by not moving. Only scenarios with `rear_traffic` set use them.
+REAR_SPAWN_RANGE_M = 150.0   # farthest a car enters behind the ego
+REAR_SPAWN_MIN_M = 60.0      # nearest it may enter, so nothing appears on top
+SPAWN_EGO_CLEAR_M = 22.0     # keep-out bubble around the ego at spawn time
 
 REACTIVE_TIME_HEADWAY_S = 1.5
 REACTIVE_BRAKE_MPS2 = 4.0
@@ -101,6 +109,13 @@ class TrafficCar:
     cruise_speed_mps: float | None = None
     target_lane: int | None = None
     lane_change_progress: float = 0.0
+    #: An attentive driver perceives the road instantly and can always avoid a
+    #: rear-end collision. An inattentive one acts on a stale view, so it can
+    #: fail to shed the closing speed behind a car that has stopped.
+    attentive: bool = True
+    #: Ring of recent (gap, leader_speed) readings; the oldest retained entry
+    #: is what an inattentive driver is currently acting on.
+    perception_log: list[tuple[float, float]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.cruise_speed_mps is None:
@@ -507,13 +522,21 @@ class DrivingEnv:
         spec = self.scenario_spec
         count = cfg.traffic_count if spec is None else spec.traffic_count
         reactive_fraction = 0.0 if spec is None else spec.reactive_fraction
+        inattentive_fraction = 0.0 if spec is None else spec.inattentive_fraction
+        rear_traffic = False if spec is None else spec.rear_traffic
         self._spawn_obstacles()
         moving_target = count + len(self.traffic)
         attempts = 0
         while len(self.traffic) < moving_target and attempts < 500:
             attempts += 1
             lane = int(self.rng.integers(0, cfg.lane_count))
-            y_m = float(self.rng.uniform(22.0, cfg.sensor_range_m + 55.0))
+            # Traffic exists behind as well as ahead — but only where the
+            # scenario asks for it. The low bound is the only thing that
+            # changes, so the draw sequence is identical when it is off.
+            low = -REAR_SPAWN_RANGE_M if rear_traffic else SPAWN_EGO_CLEAR_M
+            y_m = float(self.rng.uniform(low, cfg.sensor_range_m + 55.0))
+            if abs(y_m) < SPAWN_EGO_CLEAR_M:
+                continue
             if not self._spawn_gap_ok(lane, y_m):
                 continue
             cruise = self._sample_legal_speed()
@@ -524,9 +547,16 @@ class DrivingEnv:
             behavior = "cruiser"
             if reactive_fraction > 0.0 and self.rng.random() < reactive_fraction:
                 behavior = "reactive"
+            # Gated so a preset with no inattentive drivers consumes exactly
+            # the random numbers it did before this feature existed.
+            attentive = not (
+                inattentive_fraction > 0.0
+                and self.rng.random() < inattentive_fraction
+            )
             self.traffic.append(
                 TrafficCar(
                     lane, y_m, speed, color_index,
+                    attentive=attentive,
                     behavior=behavior, cruise_speed_mps=cruise,
                 )
             )
@@ -591,6 +621,8 @@ class DrivingEnv:
         if self.scenario != "traffic":
             return
         cfg = self.config
+        spec = self.scenario_spec
+        rear_traffic = spec is not None and spec.rear_traffic
         for car in self.traffic:
             if -45.0 <= car.y_m <= cfg.sensor_range_m + 90.0:
                 continue
@@ -609,12 +641,32 @@ class DrivingEnv:
             # with room, and never faster than the flow ahead allows.
             for _ in range(50):
                 lane = self._least_crowded_spawn_lane()
-                y_m = float(
-                    self.rng.uniform(cfg.sensor_range_m + 20.0, cfg.sensor_range_m + 80.0)
-                )
+                if rear_traffic:
+                    # A car quicker than the ego belongs behind it, closing;
+                    # a slower one belongs ahead. Deciding needs the cruise
+                    # speed first, so it is sampled early — but ONLY on this
+                    # branch. Sampling it early unconditionally would change
+                    # how many draws every seeded world consumes and silently
+                    # invalidate every published result.
+                    cruise = self._sample_legal_speed()
+                    if cruise > self.ego_speed_mps + 0.5:
+                        y_m = float(
+                            self.rng.uniform(-REAR_SPAWN_RANGE_M, -REAR_SPAWN_MIN_M)
+                        )
+                    else:
+                        y_m = float(
+                            self.rng.uniform(
+                                cfg.sensor_range_m + 20.0, cfg.sensor_range_m + 80.0
+                            )
+                        )
+                else:
+                    y_m = float(
+                        self.rng.uniform(cfg.sensor_range_m + 20.0, cfg.sensor_range_m + 80.0)
+                    )
                 if not self._spawn_gap_ok(lane, y_m, ignore=car):
                     continue
-                cruise = self._sample_legal_speed()
+                if not rear_traffic:
+                    cruise = self._sample_legal_speed()
                 entry = self._entry_speed(lane, y_m, cruise, ignore=car)
                 if not self._entry_rear_ok(lane, y_m, entry, ignore=car):
                     continue
@@ -625,6 +677,13 @@ class DrivingEnv:
                 car.color_index = int(self.rng.integers(0, 6))
                 car.target_lane = None
                 car.lane_change_progress = 0.0
+                # A recycled car is a different driver. Re-roll attentiveness
+                # and discard the previous driver's stale readings — gated so
+                # a preset without inattentive drivers draws nothing extra.
+                fraction = 0.0 if spec is None else spec.inattentive_fraction
+                if fraction > 0.0:
+                    car.attentive = self.rng.random() >= fraction
+                car.perception_log.clear()
                 break
             # If no safe gap exists this step, the car simply stays out of
             # range and tries again on a later step.
@@ -804,6 +863,7 @@ class DrivingEnv:
 
         lane = self.traffic_lane(car)
         gap, leader_speed = self._nearest_front_gap(car)
+        gap, leader_speed = self._perceive(car, gap, leader_speed)
         self._follow_safely(car, gap, leader_speed)
         assert car.cruise_speed_mps is not None
         if (
@@ -824,7 +884,32 @@ class DrivingEnv:
 
         lane = self.traffic_lane(car)
         gap, leader_speed = self._front_gap_for(car, lane)
+        gap, leader_speed = self._perceive(car, gap, leader_speed)
         self._follow_safely(car, gap, leader_speed)
+
+    def _perceive(
+        self, car: TrafficCar, gap: float, leader_speed: float
+    ) -> tuple[float, float]:
+        """What this driver believes the road ahead looks like right now.
+
+        Attentive drivers see the truth, which is why they can always avoid a
+        car that stops in front of them — the safe-following model brakes in
+        time by construction. Inattentive ones act on a reading from
+        ``reaction_delay_s`` ago, so by the time a closing gap registers there
+        may no longer be room to shed the speed. That delay, not the traffic
+        density, is what makes standing still in a live lane dangerous.
+        """
+
+        if car.attentive or self.config.reaction_delay_s <= 0.0:
+            return gap, leader_speed
+        lag_steps = max(1, round(self.config.reaction_delay_s / self.config.dt_seconds))
+        car.perception_log.append((gap, leader_speed))
+        if len(car.perception_log) > lag_steps:
+            del car.perception_log[0]
+        # Before the log fills, the oldest entry is the most recent one, so a
+        # driver starts out effectively attentive and degrades into the full
+        # delay as the episode runs.
+        return car.perception_log[0]
 
     def _follow_safely(self, car: TrafficCar, gap: float, leader_speed: float) -> None:
         """Brake when the safe-stopping envelope is violated, else cruise.

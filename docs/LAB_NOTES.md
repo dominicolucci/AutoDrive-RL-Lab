@@ -10,8 +10,90 @@ here.
 
 **Start here if you're reading this cold:**
 [Safety scores reward standing still](#2026-08-20--a-safety-score-can-be-won-by-not-driving) ·
+[The loophole was in the map, not the reward](#2026-09-28--the-loophole-was-in-the-world-not-the-reward-function) ·
+[A stateful evaluator is order-dependent](#2026-09-28--the-random-baseline-was-answering-a-different-question-each-time) ·
 [Imitation learning fails where the demonstrations end](#2026-08-20--the-clone-drives-like-me-and-crashes-anyway) ·
 [Evaluation has to be usable outside training](#2026-08-19--evaluation-locked-inside-the-training-loop-is-half-an-evaluation)
+
+---
+
+## 2026-09-28 — The loophole was in the world, not the reward function
+
+**Expected:** the agent crawls because the reward pays too little for speed, so
+the fix is to raise the speed coefficient and retrain.
+
+**What happened:** that would have treated the symptom. Crawling isn't a bad
+trade the agent is making — in this world it is genuinely, physically safe.
+Every traffic car spawns at `y_m = uniform(22, sensor_range + 55)`, which is
+entirely *ahead* of the ego, and `_recycle_traffic` teleported anything that
+fell behind back to the front. Braking to a halt means the whole world drives
+away and never comes back. An ego that does nothing but press brake for 900
+steps finishes **100 out of 100** `dense` episodes untouched.
+
+**Why:** a reward function can only price the situations the simulator can
+produce. No coefficient makes stopping dangerous if nothing can ever hit you
+from behind. I spent an hour reading the reward before looking at the spawn
+geometry, which was the wrong end of the problem.
+
+**Changed:** a fourth preset, `unforgiving`. Traffic also spawns behind the ego
+and closes at its own cruise speed, and 40% of drivers are *inattentive* —
+they act on a view of the road 0.9 s stale (`EnvConfig.reaction_delay_s`),
+implemented as a fixed-length `perception_log` per car. That delay is the
+danger mechanism: the safe-following model means an attentive driver can always
+avoid a car that stops, so density alone changes nothing. Same brake-only
+measurement on `unforgiving`: rear-ended in **23 of 100** episodes. Every
+policy loses ground, and the trained agent loses it where it used to be
+strongest — 100% → **88%** safe completion, so its crawling now costs 12 points
+it previously got for free.
+
+**Worth being careful about:** the three original presets had to stay *exactly*
+as they were, or `BENCHMARK_current.md` would silently become a comparison
+against a different simulator. Freezing them meant more than defaulting the new
+fields to off — an earlier version sampled a cruise speed one call earlier
+inside `_recycle_traffic`, which consumed a different number of random draws
+and desynchronised every seeded world. `dense` moved from 12% to 6% for a
+policy I hadn't touched. The check that caught it, and now guards it, is a
+SHA-256 over every observation and reward across three presets × three seeds:
+identical before and after. The regenerated table confirms it independently —
+the DQN, clone and heuristic rows came back byte-for-byte.
+
+**Generalised:** when an agent finds a degenerate strategy, ask what the world
+makes possible before asking what the reward pays for.
+
+---
+
+## 2026-09-28 — The random baseline was answering a different question each time
+
+**Expected:** adding a fourth cell to the benchmark would leave the other three
+rows untouched, because every policy sees the same seeded worlds.
+
+**What happened:** the `random` row moved. Not the DQN, not the clone, not the
+heuristic — only random, and only in cells evaluated after the new one.
+
+**Why:** `RandomPolicy` built one RNG in its constructor and its `reset()` did
+nothing, so a single action stream ran across every episode of every cell in
+order. Episode 7 of `dense` therefore depended on how many episodes had already
+been drawn from that stream — which is to say, on which *other* cells were
+requested. The worlds were identical, as promised. The driver was not. A
+benchmark whose answer depends on the shape of the question is not a benchmark.
+
+**Changed:** `reset()` now takes the episode seed and `RandomPolicy` reseeds
+from `(base_seed, episode_seed)`, so a cell scores the same alone as it does in
+company — asserted directly in `tests/test_benchmark.py`, and that test fails
+if the fix is reverted. `BENCHMARK_current.md` was regenerated; only the random
+rows moved (sparse 38%→29%, dense 16%→13%).
+
+**Unexpected, and it's the interesting part:** `random` now scores *identically*
+on `sparse` and `normal` — every column, to the last decimal. That is not a bug.
+Given the same actions from the same start, a driver that leaves the road after
+121 m never reaches any traffic, so the two worlds are indistinguishable to it.
+The identical rows say out loud what the old 38%-vs-43% spread hid: the random
+baseline's safety score in light traffic measures steering, not driving, and has
+nothing to do with the cars.
+
+**Generalised:** a stateful evaluator is order-dependent until proven otherwise,
+and the test that catches it is cheap — score one cell twice, alone and in
+company, and assert equality.
 
 ---
 
@@ -28,7 +110,7 @@ traffic covers **1,522 m at 16.9 m/s**, and the rule-based driver covers 572 m
 through the same dense worlds.
 
 The clincher is the random baseline. A policy pressing buttons at random is
-scored **38% safe** in sparse traffic — because it travels 115 m at 2.4 m/s and
+scored **29% safe** in sparse traffic — because it travels 121 m at 2.6 m/s and
 never gets near another car.
 
 **Why:** safe completion asks "did you avoid crashing?" and nothing else. Standing
@@ -40,6 +122,11 @@ it learned exactly what it was told to want.
 **Changed:** the benchmark now reports distance and mean speed alongside safety,
 and separates collision rate from off-road rate rather than collapsing both into
 one "unsafe" bucket. Evidence: `BENCHMARK_current.md`.
+
+**Since:** the fix went into the world rather than the reward — see
+[the loophole was in the world](#2026-09-28--the-loophole-was-in-the-world-not-the-reward-function).
+The `unforgiving` cell makes stopping cost something, and the same agent drops
+to 88% safe completion there.
 
 **Still open:** is this a property of the training method or of one lucky run?
 Three seeds (`run_s1/2/3`) exist and have not been benchmarked. And the causal

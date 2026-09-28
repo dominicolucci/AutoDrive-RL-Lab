@@ -25,7 +25,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 DRIVE_POLICIES = ("heuristic", "manual", "random", "dqn")
 SCENARIOS = ("traffic", "lane")
-PRESETS = ("sparse", "normal", "dense", "random")
+PRESETS = ("sparse", "normal", "dense", "unforgiving", "random")
+
+#: Cells the benchmark *offers*. The first three are what `BENCHMARK_current.md`
+#: was measured on and stay the default selection, so an untouched form still
+#: reproduces the published table; "unforgiving" is opt-in.
+BENCHMARK_CELL_CHOICES = ("sparse", "normal", "dense", "unforgiving")
 BENCHMARK_CELLS = ("sparse", "normal", "dense")
 BASELINE_POLICIES = ("heuristic", "random")
 

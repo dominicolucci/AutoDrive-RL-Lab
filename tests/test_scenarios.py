@@ -24,7 +24,9 @@ from autodrive_rl.train import build_parser, train
 
 class ScenarioSpecTests(unittest.TestCase):
     def test_presets_exist_and_normal_matches_default_world(self) -> None:
-        self.assertEqual(set(SCENARIO_PRESETS), {"sparse", "normal", "dense"})
+        self.assertEqual(
+            set(SCENARIO_PRESETS), {"sparse", "normal", "dense", "unforgiving"}
+        )
         normal = SCENARIO_PRESETS["normal"]
         self.assertEqual(normal.traffic_count, EnvConfig().traffic_count)
         self.assertEqual(normal.obstacle_count, 0)
@@ -33,6 +35,17 @@ class ScenarioSpecTests(unittest.TestCase):
         self.assertEqual((dense.traffic_count, dense.obstacle_count), (14, 2))
         self.assertEqual(dense.reactive_fraction, 0.5)
 
+    def test_only_unforgiving_puts_traffic_behind_the_ego(self) -> None:
+        """The three original presets are frozen: `BENCHMARK_current.md` was
+        measured on them, so a world-model change must not touch them."""
+        for name in ("sparse", "normal", "dense"):
+            spec = SCENARIO_PRESETS[name]
+            self.assertFalse(spec.rear_traffic, name)
+            self.assertEqual(spec.inattentive_fraction, 0.0, name)
+        hard = SCENARIO_PRESETS["unforgiving"]
+        self.assertTrue(hard.rear_traffic)
+        self.assertGreater(hard.inattentive_fraction, 0.0)
+
     def test_invalid_values_raise(self) -> None:
         with self.assertRaises(ValueError):
             ScenarioSpec(traffic_count=-1)
@@ -40,6 +53,8 @@ class ScenarioSpecTests(unittest.TestCase):
             ScenarioSpec(obstacle_count=-1)
         with self.assertRaises(ValueError):
             ScenarioSpec(reactive_fraction=1.5)
+        with self.assertRaises(ValueError):
+            ScenarioSpec(inattentive_fraction=1.5)
         with self.assertRaises(ValueError):
             resolve_scenario("nope")
 
@@ -358,6 +373,93 @@ class ReactiveBrakingTests(unittest.TestCase):
                 obstacle.y_m - car.y_m, env.config.car_length_m
             )
         self.assertTrue(slowed)
+
+
+class RearTrafficTests(unittest.TestCase):
+    """Standing still has to cost something.
+
+    Every policy in `BENCHMARK_current.md` scores well on safety by crawling,
+    and the reason is geometric: all traffic used to spawn *ahead* of the ego,
+    so braking to a stop made the world drive away and leave it alone. These
+    tests pin the two halves of the fix — traffic that arrives from behind, and
+    drivers too slow to avoid a car that stops in front of them.
+    """
+
+    def _episode_ends_in_a_collision(self, preset: str, seed: int) -> bool:
+        env = DrivingEnv(
+            replace(EnvConfig(), max_steps=400),
+            scenario="traffic",
+            seed=seed,
+            scenario_spec=resolve_scenario(preset),
+        )
+        env.reset(seed=seed)
+        for _ in range(400):
+            _, _, terminated, truncated, info = env.step(Action.BRAKE)
+            if terminated or truncated:
+                return bool(info["collision"])
+        return False
+
+    def test_frozen_presets_keep_every_car_ahead_of_the_ego(self) -> None:
+        for preset in ("sparse", "normal", "dense"):
+            for seed in range(8):
+                env = DrivingEnv(
+                    EnvConfig(), scenario="traffic", seed=seed,
+                    scenario_spec=resolve_scenario(preset),
+                )
+                for car in env.traffic:
+                    self.assertGreater(car.y_m, 0.0, f"{preset}/{seed}: {car}")
+
+    def test_unforgiving_puts_cars_behind_the_ego(self) -> None:
+        found = False
+        for seed in range(8):
+            env = DrivingEnv(
+                EnvConfig(), scenario="traffic", seed=seed,
+                scenario_spec=resolve_scenario("unforgiving"),
+            )
+            found = found or any(car.y_m < 0.0 for car in env.traffic)
+        self.assertTrue(found)
+
+    def test_no_car_ever_spawns_on_top_of_the_ego(self) -> None:
+        """Rear spawning must not become a free collision at step zero."""
+        for seed in range(12):
+            env = DrivingEnv(
+                EnvConfig(), scenario="traffic", seed=seed,
+                scenario_spec=resolve_scenario("unforgiving"),
+            )
+            for car in env.traffic:
+                self.assertGreaterEqual(abs(car.y_m), env.config.car_length_m)
+
+    def test_an_attentive_driver_sees_the_road_as_it_is(self) -> None:
+        env = DrivingEnv(EnvConfig(), scenario="lane", seed=1)
+        car = TrafficCar(0, 40.0, 20.0, behavior="cruiser", attentive=True)
+        self.assertEqual(env._perceive(car, 30.0, 12.0), (30.0, 12.0))
+        self.assertEqual(env._perceive(car, 5.0, 0.0), (5.0, 0.0))
+
+    def test_an_inattentive_driver_acts_on_a_stale_reading(self) -> None:
+        """This is the mechanism that makes stopping dangerous: by the time an
+        inattentive driver perceives the gap closing, it is already too late to
+        brake all the way out of it."""
+        env = DrivingEnv(EnvConfig(), scenario="lane", seed=1)
+        car = TrafficCar(0, 40.0, 20.0, behavior="cruiser", attentive=False)
+        self.assertEqual(env._perceive(car, 60.0, 20.0), (60.0, 20.0))
+        stale, _ = env._perceive(car, 2.0, 0.0)
+        self.assertEqual(stale, 60.0)
+
+    def test_a_zero_delay_config_disables_the_lag_entirely(self) -> None:
+        env = DrivingEnv(replace(EnvConfig(), reaction_delay_s=0.0),
+                         scenario="lane", seed=1)
+        car = TrafficCar(0, 40.0, 20.0, behavior="cruiser", attentive=False)
+        env._perceive(car, 60.0, 20.0)
+        self.assertEqual(env._perceive(car, 2.0, 0.0), (2.0, 0.0))
+
+    def test_standing_still_is_punished_on_unforgiving_and_not_on_dense(self) -> None:
+        """The headline claim, asserted rather than described: an ego that
+        brakes and sits there survives `dense` and gets hit on `unforgiving`."""
+        seeds = range(360000, 360040)
+        dense = sum(self._episode_ends_in_a_collision("dense", s) for s in seeds)
+        hard = sum(self._episode_ends_in_a_collision("unforgiving", s) for s in seeds)
+        self.assertEqual(dense, 0)
+        self.assertGreaterEqual(hard, 6)
 
 
 class LaneChangeTests(unittest.TestCase):

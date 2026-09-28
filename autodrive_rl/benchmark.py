@@ -70,7 +70,11 @@ DEFAULT_SEED_START = 350_000
 class Policy(Protocol):
     name: str
 
-    def reset(self) -> None: ...
+    #: Called once per episode with that episode's world seed. A policy with
+    #: internal randomness must reseed from it: otherwise its action stream
+    #: depends on how many episodes ran before, so the same cell scores
+    #: differently depending on which *other* cells were requested alongside it.
+    def reset(self, seed: int) -> None: ...
 
     def act(self, env: DrivingEnv, observation: np.ndarray) -> int: ...
 
@@ -83,7 +87,7 @@ class CheckpointPolicy:
         self.name = self.path.stem
         self._agent = DQNAgent.load(self.path, seed=seed)
 
-    def reset(self) -> None:  # stateless between episodes
+    def reset(self, seed: int) -> None:  # greedy, so stateless between episodes
         return None
 
     def act(self, env: DrivingEnv, observation: np.ndarray) -> int:
@@ -99,7 +103,7 @@ class HeuristicPolicy:
     def __init__(self) -> None:
         self._driver = HeuristicDriver()
 
-    def reset(self) -> None:
+    def reset(self, seed: int) -> None:
         self._driver.reset()
 
     def act(self, env: DrivingEnv, observation: np.ndarray) -> int:
@@ -112,11 +116,14 @@ class RandomPolicy:
     name = "random"
 
     def __init__(self, *, seed: int, action_count: int = 5) -> None:
+        self._seed = seed
         self._rng = np.random.default_rng(seed)
         self._action_count = action_count
 
-    def reset(self) -> None:
-        return None
+    def reset(self, seed: int) -> None:
+        # Derived from (base seed, episode seed) so episode N of a cell always
+        # sees the same actions, whatever ran before it.
+        self._rng = np.random.default_rng((self._seed, seed))
 
     def act(self, env: DrivingEnv, observation: np.ndarray) -> int:
         return int(self._rng.integers(self._action_count))
@@ -171,7 +178,7 @@ def run_episode(
         scenario_spec=scenario_spec,
     )
     observation, _ = env.reset(seed=seed)
-    policy.reset()
+    policy.reset(seed)
 
     episode_return = 0.0
     speeds: list[float] = []
@@ -283,11 +290,7 @@ def format_markdown(
         )
 
     preset_notes = ", ".join(
-        f"**{c}** = {SCENARIO_PRESETS[c].traffic_count} cars / "
-        f"{SCENARIO_PRESETS[c].obstacle_count} obstacles / "
-        f"{SCENARIO_PRESETS[c].reactive_fraction:.0%} lane-changers"
-        for c in cells
-        if c in SCENARIO_PRESETS
+        _describe_cell(c) for c in cells if c in SCENARIO_PRESETS
     )
 
     lines += [
@@ -308,10 +311,35 @@ def format_markdown(
         "```bash",
         "python -m autodrive_rl.benchmark \\",
         *[f"  --policy {p} \\" for p in dict.fromkeys(r.policy for r in rows)],
+        # Only name the cells when they differ from the default, so the common
+        # case stays short — but never omit them when they would change the
+        # result, which is how a table stops reproducing itself.
+        *([f"  --cells {' '.join(cells)} \\"] if tuple(cells) != DEFAULT_CELLS else []),
         f"  --episodes {episodes} --seed-start {seed_start} --markdown",
         "```",
     ]
     return "\n".join(lines)
+
+
+def _describe_cell(cell: str) -> str:
+    """One phrase describing what a difficulty cell actually contains.
+
+    Two cells that read identically here would make the table misleading —
+    `unforgiving` shares its car and obstacle counts with `dense` — so every
+    field that distinguishes a preset has to appear.
+    """
+
+    spec = SCENARIO_PRESETS[cell]
+    parts = [
+        f"{spec.traffic_count} cars",
+        f"{spec.obstacle_count} obstacles",
+        f"{spec.reactive_fraction:.0%} lane-changers",
+    ]
+    if spec.rear_traffic:
+        parts.append("traffic from behind")
+    if spec.inattentive_fraction > 0.0:
+        parts.append(f"{spec.inattentive_fraction:.0%} inattentive drivers")
+    return f"**{cell}** = " + " / ".join(parts)
 
 
 def format_table(results: Iterable[CellResult]) -> str:

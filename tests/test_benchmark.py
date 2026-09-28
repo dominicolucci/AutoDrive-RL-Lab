@@ -209,6 +209,47 @@ def test_markdown_reports_seeds_and_a_reproduction_command():
     assert "identical set" in text
 
 
+def test_a_cell_scores_the_same_whatever_ran_alongside_it():
+    """The random baseline used to carry one RNG stream across every episode of
+    every cell, so asking for `dense` alone and asking for `sparse dense` gave
+    different `dense` rows. A benchmark whose answer depends on the question is
+    not a benchmark."""
+    alone = benchmark(
+        ["random"], cells=("dense",), episodes=3, seed_start=350_000,
+        max_steps=60, progress=False,
+    )
+    alongside = benchmark(
+        ["random"], cells=("sparse", "dense"), episodes=3, seed_start=350_000,
+        max_steps=60, progress=False,
+    )
+    dense_alone = next(r for r in alone if r.cell == "dense")
+    dense_alongside = next(r for r in alongside if r.cell == "dense")
+    assert dense_alone == dense_alongside
+
+
+def test_markdown_names_non_default_cells_in_the_reproduction_command():
+    """Omitting `--cells` when the run used a non-default set would print a
+    command that regenerates a *different* table."""
+    results = benchmark(
+        ["random"], cells=("unforgiving",), episodes=1, seed_start=350_000,
+        max_steps=30, progress=False,
+    )
+    text = format_markdown(results, episodes=1, seed_start=350_000, max_steps=30)
+    assert "--cells unforgiving" in text
+
+
+def test_markdown_distinguishes_cells_that_differ_only_in_the_new_fields():
+    """`unforgiving` shares its car and obstacle counts with `dense`; a legend
+    printing only those would describe two different worlds identically."""
+    results = benchmark(
+        ["random"], cells=("dense", "unforgiving"), episodes=1, seed_start=350_000,
+        max_steps=30, progress=False,
+    )
+    text = format_markdown(results, episodes=1, seed_start=350_000, max_steps=30)
+    assert "traffic from behind" in text
+    assert "inattentive" in text
+
+
 def test_plain_table_renders():
     results = benchmark(
         ["random"], cells=("sparse",), episodes=1, seed_start=1,

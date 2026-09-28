@@ -18,6 +18,11 @@ class EnvConfig:
     max_speed_mps: float = 49.0   # ~110 mph flat-out
     target_speed_mps: float = 28.0
     speed_limit_mps: float = 29.0  # ~65 mph posted limit
+    #: How stale an inattentive driver's view of the road is. At 0.9 s a
+    #: follower closing at 20 m/s covers ~18 m before it starts reacting —
+    #: harmless behind a car moving with the flow, dangerous behind one that
+    #: has stopped. Only applies to drivers marked inattentive.
+    reaction_delay_s: float = 0.9
     traffic_min_speed_mps: float = 9.0
     max_lateral_speed_mps: float = 2.6
     acceleration_mps2: float = 3.2
@@ -62,6 +67,16 @@ class ScenarioSpec:
     traffic_count: int = 9
     obstacle_count: int = 0
     reactive_fraction: float = 0.0
+    #: Whether traffic also approaches from behind. Off by default: turning it
+    #: on changes what every existing result means, so the original presets stay
+    #: frozen and only new ones opt in.
+    rear_traffic: bool = False
+    #: Fraction of drivers who perceive the road with a reaction delay rather
+    #: than instantaneously. Defaults to 0.0, which reproduces the original
+    #: behaviour exactly. Above zero, a slow or stopped ego becomes genuinely
+    #: dangerous, because some followers notice too late to shed the closing
+    #: speed.
+    inattentive_fraction: float = 0.0
 
     def __post_init__(self) -> None:
         if self.traffic_count < 0:
@@ -70,6 +85,8 @@ class ScenarioSpec:
             raise ValueError("obstacle_count must be >= 0")
         if not 0.0 <= self.reactive_fraction <= 1.0:
             raise ValueError("reactive_fraction must be in [0, 1]")
+        if not 0.0 <= self.inattentive_fraction <= 1.0:
+            raise ValueError("inattentive_fraction must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -79,12 +96,23 @@ class ScenarioRanges:
     traffic_count: tuple[int, int] = (4, 14)
     obstacle_count: tuple[int, int] = (0, 3)
     reactive_fraction: tuple[float, float] = (0.0, 1.0)
+    # Zero by default: widening this silently would change what every existing
+    # 'random' training run means.
+    inattentive_fraction: tuple[float, float] = (0.0, 0.0)
+    rear_traffic: bool = False
 
 
 SCENARIO_PRESETS: dict[str, ScenarioSpec] = {
     "sparse": ScenarioSpec(traffic_count=4, obstacle_count=0, reactive_fraction=0.0),
     "normal": ScenarioSpec(traffic_count=9, obstacle_count=0, reactive_fraction=0.0),
     "dense": ScenarioSpec(traffic_count=14, obstacle_count=2, reactive_fraction=0.5),
+    # Same world as "dense", except traffic also arrives from behind and 40%
+    # of drivers react late. A policy that survives by crawling gets rear-ended
+    # here, which the other three presets cannot express.
+    "unforgiving": ScenarioSpec(
+        traffic_count=14, obstacle_count=2, reactive_fraction=0.5,
+        rear_traffic=True, inattentive_fraction=0.4,
+    ),
 }
 
 
@@ -99,6 +127,8 @@ def sample_scenario(ranges: ScenarioRanges, rng: np.random.Generator) -> Scenari
             rng.integers(ranges.obstacle_count[0], ranges.obstacle_count[1] + 1)
         ),
         reactive_fraction=float(rng.uniform(*ranges.reactive_fraction)),
+        inattentive_fraction=float(rng.uniform(*ranges.inattentive_fraction)),
+        rear_traffic=ranges.rear_traffic,
     )
 
 
@@ -108,6 +138,8 @@ def resolve_scenario(
     traffic: int | None = None,
     obstacles: int | None = None,
     reactive: float | None = None,
+    inattentive: float | None = None,
+    rear_traffic: bool | None = None,
     rng: np.random.Generator | None = None,
     ranges: ScenarioRanges | None = None,
 ) -> ScenarioSpec:
@@ -125,4 +157,8 @@ def resolve_scenario(
         traffic_count=base.traffic_count if traffic is None else traffic,
         obstacle_count=base.obstacle_count if obstacles is None else obstacles,
         reactive_fraction=base.reactive_fraction if reactive is None else reactive,
+        inattentive_fraction=(
+            base.inattentive_fraction if inattentive is None else inattentive
+        ),
+        rear_traffic=base.rear_traffic if rear_traffic is None else rear_traffic,
     )

@@ -30,6 +30,7 @@ from typing import Any
 
 from .commands import (
     BASELINE_POLICIES,
+    BENCHMARK_CELL_CHOICES,
     BENCHMARK_CELLS,
     DRIVE_POLICIES,
     PRESETS,
@@ -408,10 +409,12 @@ class BenchmarkPanel(Panel):
         style_listbox(self.policy_list, self.fonts)
         self.policy_list.bind("<<ListboxSelect>>", lambda _e: change())
 
-        f = Field(self, 2, "Difficulty", "dense adds obstacles and lane changers")
+        f = Field(self, 2, "Difficulty", "unforgiving adds traffic from behind")
         self.cell_vars: dict[str, tk.BooleanVar] = {}
-        for cell in BENCHMARK_CELLS:
-            self.cell_vars[cell] = check(f.holder, cell, True, change)
+        for cell in BENCHMARK_CELL_CHOICES:
+            self.cell_vars[cell] = check(
+                f.holder, cell, cell in BENCHMARK_CELLS, change
+            )
 
         f = Field(self, 3, "Sample", "100 gives a publishable sample")
         self.episodes = entry(f.holder, 100, 8, change)

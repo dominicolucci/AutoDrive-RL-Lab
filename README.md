@@ -155,8 +155,29 @@ python -m autodrive_rl.play --policy dqn --model models/autodrive_dqn_best.npz -
 ```
 
 Presets: `sparse` (4 cars), `normal` (today's 9-car world), `dense`
-(14 cars, 2 obstacles, half the drivers reactive), `random`. Override any
-field with `--traffic N`, `--obstacles N`, or `--reactive F` (0 to 1).
+(14 cars, 2 obstacles, half the drivers reactive), `unforgiving`, `random`.
+Override any field with `--traffic N`, `--obstacles N`, or `--reactive F`
+(0 to 1).
+
+### `unforgiving`: where standing still is not safe
+
+In the first three presets every car spawns *ahead* of the ego, so braking to
+a halt is a winning move — the world simply drives away and leaves it alone.
+That is the loophole `BENCHMARK_current.md` caught the trained agent
+exploiting: 100% safe completion at 3.0 m/s.
+
+`unforgiving` closes it. Traffic also spawns *behind* the ego and catches up at
+its own cruise speed, and 40% of drivers are **inattentive** — they act on a
+view of the road `reaction_delay_s` (0.9 s) stale, which is long enough that a
+car stopping in front of them cannot always be avoided. An attentive follower
+can always avoid a car that stops; the delay is the danger, not the density.
+
+The other three presets are deliberately unchanged — the rear spawning and the
+inattention are both gated behind fields that default to off, and a SHA-256
+over every observation and reward across `sparse`/`normal`/`dense` × three
+seeds is identical before and after this change — so the published benchmark
+stays comparable. `unforgiving` is a fourth cell you opt into with
+`--cells unforgiving`. Results: `BENCHMARK_unforgiving.md`.
 
 Training now uses domain randomization by default: after the warm-up
 curriculum, every episode rolls fresh conditions from the `random` ranges,
@@ -226,6 +247,7 @@ step to inspect the exact breakdown.
 | `tests/` | Behavioral and learning-component tests |
 | `LEARNING_GUIDE.md` | Guided walkthrough and suggested experiments |
 | `docs/LAB_NOTES.md` | Running log of findings, surprises, and open questions |
+| `BENCHMARK_unforgiving.md` | Held-out results including the `unforgiving` cell |
 | `BENCHMARK.md` | Held-out results (historical — regenerate with `autodrive_rl.benchmark`) |
 
 ## Run verification

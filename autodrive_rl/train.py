@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scenario", choices=("lane", "traffic"), default="traffic")
     parser.add_argument(
         "--scenario-preset",
-        choices=("sparse", "normal", "dense", "random"),
+        choices=("sparse", "normal", "dense", "unforgiving", "random"),
         default="random",
         help="world conditions for full-traffic episodes (default: random)",
     )

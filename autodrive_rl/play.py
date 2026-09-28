@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scenario", choices=("lane", "traffic"), default="traffic")
     parser.add_argument(
         "--scenario-preset",
-        choices=("sparse", "normal", "dense", "random"),
+        choices=("sparse", "normal", "dense", "unforgiving", "random"),
         default="normal",
         help="world conditions to drive in (default: normal, today's world)",
     )
