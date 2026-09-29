@@ -99,6 +99,8 @@ def test_episode_result_has_the_expected_shape():
         "return",
         "distance_m",
         "collision",
+        "at_fault",
+        "stalled",
         "off_road",
         "safe",
         "mean_speed_mps",
@@ -248,6 +250,27 @@ def test_markdown_distinguishes_cells_that_differ_only_in_the_new_fields():
     text = format_markdown(results, episodes=1, seed_start=350_000, max_steps=30)
     assert "traffic from behind" in text
     assert "inattentive" in text
+
+
+def test_a_stall_is_not_counted_as_a_safe_completion():
+    """The whole point of the rule: blocking a lane must not read as success."""
+    results = benchmark(
+        ["random"], cells=("normal",), episodes=4, seed_start=350_000,
+        max_steps=200, progress=False,
+    )
+    row = results[0]
+    assert row.stall_rate > 0.0, "random driving should obstruct sometimes"
+    assert row.safe_rate <= 1.0 - row.stall_rate
+
+
+def test_markdown_reports_fault_and_stalls():
+    results = benchmark(
+        ["random"], cells=("normal",), episodes=2, seed_start=350_000,
+        max_steps=60, progress=False,
+    )
+    text = format_markdown(results, episodes=2, seed_start=350_000, max_steps=60)
+    assert "At fault" in text
+    assert "Stalled" in text
 
 
 def test_plain_table_renders():

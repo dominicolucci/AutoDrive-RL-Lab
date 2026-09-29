@@ -32,8 +32,15 @@ class ScenarioSpecTests(unittest.TestCase):
         self.assertEqual(normal.obstacle_count, 0)
         self.assertEqual(normal.reactive_fraction, 0.0)
         dense = SCENARIO_PRESETS["dense"]
-        self.assertEqual((dense.traffic_count, dense.obstacle_count), (14, 2))
+        self.assertEqual((dense.traffic_count, dense.slow_vehicle_count), (16, 2))
         self.assertEqual(dense.reactive_fraction, 0.5)
+
+    def test_no_traffic_preset_uses_static_obstacles(self) -> None:
+        """A permanent immovable block in a live motorway lane, with a queue
+        stacked behind it, is not a problem a highway driver ever solves. Slow
+        vehicles create the same lane-change pressure realistically."""
+        for name, spec in SCENARIO_PRESETS.items():
+            self.assertEqual(spec.obstacle_count, 0, name)
 
     def test_only_unforgiving_puts_traffic_behind_the_ego(self) -> None:
         """The three original presets are frozen: `BENCHMARK_current.md` was
@@ -55,6 +62,8 @@ class ScenarioSpecTests(unittest.TestCase):
             ScenarioSpec(reactive_fraction=1.5)
         with self.assertRaises(ValueError):
             ScenarioSpec(inattentive_fraction=1.5)
+        with self.assertRaises(ValueError):
+            ScenarioSpec(slow_vehicle_count=-1)
         with self.assertRaises(ValueError):
             resolve_scenario("nope")
 
@@ -460,6 +469,93 @@ class RearTrafficTests(unittest.TestCase):
         hard = sum(self._episode_ends_in_a_collision("unforgiving", s) for s in seeds)
         self.assertEqual(dense, 0)
         self.assertGreaterEqual(hard, 6)
+
+
+class StallAndFaultTests(unittest.TestCase):
+    """Two rules that decide what the agent is actually being scored on."""
+
+    def _spec(self, **kw):
+        return ScenarioSpec(**kw)
+
+    def test_an_obstructing_car_stalls_out(self) -> None:
+        """Sitting still on an open motorway lane ends the episode."""
+        env = DrivingEnv(
+            replace(EnvConfig(), max_steps=400), scenario="traffic", seed=3,
+            scenario_spec=resolve_scenario("normal"),
+        )
+        env.reset(seed=3)
+        for _ in range(400):
+            _, _, terminated, _, info = env.step(Action.BRAKE)
+            if terminated:
+                break
+        self.assertTrue(info["stalled"])
+        self.assertFalse(info["collision"])
+
+    def test_slowing_behind_traffic_is_not_a_stall(self) -> None:
+        """Ordinary driving includes stopping behind something. Only an open
+        lane ahead makes it obstruction."""
+        env = DrivingEnv(replace(EnvConfig(), max_steps=400), scenario="lane", seed=4)
+        env.traffic = [TrafficCar(env.current_lane, 8.0, 0.0, behavior="obstacle")]
+        env.ego_speed_mps = 0.0
+        stall_limit = round(env.config.stall_grace_s / env.config.dt_seconds)
+        for _ in range(stall_limit * 3):
+            _, _, _, _, info = env.step(Action.BRAKE)
+            self.assertFalse(info["stalled"])
+
+    def test_the_rule_based_driver_never_obstructs(self) -> None:
+        """If the heuristic stalls, the threshold is wrong rather than the
+        driver — so this is the calibration check for the whole rule."""
+        from autodrive_rl.benchmark import benchmark
+
+        results = benchmark(
+            ["heuristic"], cells=("normal", "dense"), episodes=6,
+            seed_start=350_000, max_steps=400, progress=False,
+        )
+        for r in results:
+            self.assertEqual(r.stall_rate, 0.0, r.cell)
+
+    def test_running_into_the_car_ahead_is_the_egos_fault(self) -> None:
+        env = DrivingEnv(EnvConfig(), scenario="lane", seed=5)
+        ahead = TrafficCar(env.current_lane, 5.0, 0.0, behavior="obstacle")
+        env.traffic = [ahead]
+        self.assertTrue(env._ego_at_fault(ahead))
+
+    def test_being_struck_from_behind_while_driving_is_not(self) -> None:
+        """A follower owns its own stopping distance."""
+        env = DrivingEnv(EnvConfig(), scenario="lane", seed=5)
+        env.ego_speed_mps = 20.0
+        env.ego_lateral_speed_mps = 0.0
+        behind = TrafficCar(env.current_lane, -4.0, 26.0)
+        env.traffic = [behind]
+        self.assertFalse(env._ego_at_fault(behind))
+
+    def test_being_struck_from_behind_while_stopped_is_the_egos_fault(self) -> None:
+        """Stopping in a live lane is the unreasonable act that caused it."""
+        env = DrivingEnv(EnvConfig(), scenario="lane", seed=5)
+        env.ego_speed_mps = 0.0
+        env.ego_lateral_speed_mps = 0.0
+        behind = TrafficCar(env.current_lane, -4.0, 26.0)
+        env.traffic = [behind]
+        self.assertTrue(env._ego_at_fault(behind))
+
+    def test_merging_into_someone_is_the_egos_fault(self) -> None:
+        env = DrivingEnv(EnvConfig(), scenario="lane", seed=5)
+        env.ego_speed_mps = 20.0
+        env.ego_lateral_speed_mps = 2.0  # actively moving sideways
+        alongside = TrafficCar(env.current_lane, -1.0, 20.0)
+        env.traffic = [alongside]
+        self.assertTrue(env._ego_at_fault(alongside))
+
+    def test_slow_vehicles_move_but_stay_below_the_flow(self) -> None:
+        for seed in range(6):
+            env = DrivingEnv(
+                EnvConfig(), scenario="traffic", seed=seed,
+                scenario_spec=ScenarioSpec(traffic_count=4, slow_vehicle_count=2),
+            )
+            slow = sorted(c.cruise_speed_mps for c in env.traffic)[:2]
+            for speed in slow:
+                self.assertGreater(speed, 0.0)
+                self.assertLess(speed, env.config.traffic_min_speed_mps + 0.1)
 
 
 class LaneChangeTests(unittest.TestCase):

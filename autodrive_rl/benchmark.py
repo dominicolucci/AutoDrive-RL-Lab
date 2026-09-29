@@ -159,6 +159,8 @@ class CellResult:
     mean_distance_m: float
     safe_rate: float
     collision_rate: float
+    at_fault_rate: float
+    stall_rate: float
     off_road_rate: float
     mean_speed_mps: float
 
@@ -190,12 +192,18 @@ def run_episode(
         if terminated or truncated:
             collision = bool(info["collision"])
             off_road = bool(info["off_road"])
+            stalled = bool(info["stalled"])
             return {
                 "return": episode_return,
                 "distance_m": float(info["distance_m"]),
                 "collision": collision,
+                "at_fault": bool(info["at_fault"]),
+                "stalled": stalled,
                 "off_road": off_road,
-                "safe": not collision and not off_road,
+                # Stalling in a live lane is a failure, not a safe outcome —
+                # counting it as success is exactly how a safety score gets
+                # won by not driving.
+                "safe": not collision and not off_road and not stalled,
                 "mean_speed_mps": fmean(speeds) if speeds else 0.0,
             }
 
@@ -226,6 +234,8 @@ def evaluate_cell(
         mean_distance_m=fmean(float(r["distance_m"]) for r in episode_results),
         safe_rate=sum(bool(r["safe"]) for r in episode_results) / episodes,
         collision_rate=sum(bool(r["collision"]) for r in episode_results) / episodes,
+        at_fault_rate=sum(bool(r["at_fault"]) for r in episode_results) / episodes,
+        stall_rate=sum(bool(r["stalled"]) for r in episode_results) / episodes,
         off_road_rate=sum(bool(r["off_road"]) for r in episode_results) / episodes,
         mean_speed_mps=fmean(float(r["mean_speed_mps"]) for r in episode_results),
     )
@@ -275,8 +285,9 @@ def format_markdown(
     seed_end = seed_start + episodes - 1
 
     lines = [
-        "| Policy | Cell | Mean return | Safe completion | Collision | Off-road | Distance | Mean speed |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Policy | Cell | Mean return | Safe completion | Collision | At fault | Stalled "
+        "| Off-road | Distance | Mean speed |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for r in rows:
         lines.append(
@@ -284,6 +295,8 @@ def format_markdown(
             f"| {r.mean_return:,.1f} ± {r.return_stdev:,.0f} "
             f"| {r.safe_rate:.0%} "
             f"| {r.collision_rate:.0%} "
+            f"| {r.at_fault_rate:.0%} "
+            f"| {r.stall_rate:.0%} "
             f"| {r.off_road_rate:.0%} "
             f"| {r.mean_distance_m:,.0f} m "
             f"| {r.mean_speed_mps:.1f} m/s |"
@@ -303,8 +316,13 @@ def format_markdown(
         f"Difficulty cells: {preset_notes}.",
         "",
         '"Safe completion" means the episode reached the step limit without a '
-        "collision or off-road event. Return is shown as mean ± population "
-        "standard deviation across episodes.",
+        "collision, an off-road event, or a stall. A stall is the ego sitting "
+        "below the minimum speed in a live lane for longer than the grace "
+        "period — blocking a motorway lane is a failure, not a safe outcome. "
+        '"At fault" counts only the collisions the ego caused: running into '
+        "something ahead, merging into someone, or being struck from behind "
+        "while stopped. Return is shown as mean ± population standard "
+        "deviation across episodes.",
         "",
         "Regenerate with:",
         "",

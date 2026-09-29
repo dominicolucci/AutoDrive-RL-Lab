@@ -154,30 +154,49 @@ python -m autodrive_rl.play --policy heuristic --scenario-preset dense
 python -m autodrive_rl.play --policy dqn --model models/autodrive_dqn_best.npz --scenario-preset sparse
 ```
 
-Presets: `sparse` (4 cars), `normal` (today's 9-car world), `dense`
-(14 cars, 2 obstacles, half the drivers reactive), `unforgiving`, `random`.
-Override any field with `--traffic N`, `--obstacles N`, or `--reactive F`
-(0 to 1).
+Presets: `sparse` (4 cars), `normal` (9 cars), `dense` (16 cars plus 2
+slow-moving vehicles, half the drivers reactive), `unforgiving`, `random`.
+Override any field with `--traffic N`, `--slow-vehicles N`, `--obstacles N`,
+or `--reactive F` (0 to 1).
+
+### World model v2: what the world punishes
+
+Three rules were added so the simulation penalises what a real motorway
+penalises, rather than what is easy to measure.
+
+**Static obstacles are gone.** They used to drop immovable blocks into live
+lanes with traffic queued behind them, which does not happen on a motorway and
+turned out to be the single biggest distortion in the project — see the lab
+notes. Slow-moving vehicles (6-9 m/s in a 29 m/s flow) replace them: the same
+"plan ahead and change lanes" problem, without the physics fiction. The
+`obstacle` behaviour still exists for the lane-keeping scenario.
+
+**Stalling ends the episode.** Sitting below `stall_speed_mps` for longer than
+`stall_grace_s` *with a clear lane ahead* is obstruction, and it terminates the
+run as its own kind of failure with its own column in the benchmark. The
+clear-lane condition is what separates it from ordinary driving: stopping
+behind a queue is normal, stopping on an open motorway is not. Calibration is
+pinned by a test — the rule-based driver must never trigger it, because if it
+does the threshold is wrong rather than the driver.
+
+**Collisions are attributed.** Running into something ahead, or merging into
+someone, is the ego's fault and costs the full penalty. Being struck from
+behind while driving normally is the follower's failure and costs much less —
+not nothing, because a car that stops caring about being hit stops watching its
+mirrors, but far less than a crash it caused. Being struck from behind *while
+stopped in a live lane* is the ego's fault, because stopping there is the
+unreasonable act. The benchmark reports at-fault collisions separately, which
+is the honest measure of whether a policy drives well rather than whether it
+got lucky with the traffic around it.
 
 ### `unforgiving`: where standing still is not safe
 
-In the first three presets every car spawns *ahead* of the ego, so braking to
-a halt is a winning move — the world simply drives away and leaves it alone.
-That is the loophole `BENCHMARK_current.md` caught the trained agent
-exploiting: 100% safe completion at 3.0 m/s.
-
-`unforgiving` closes it. Traffic also spawns *behind* the ego and catches up at
-its own cruise speed, and 40% of drivers are **inattentive** — they act on a
-view of the road `reaction_delay_s` (0.9 s) stale, which is long enough that a
-car stopping in front of them cannot always be avoided. An attentive follower
-can always avoid a car that stops; the delay is the danger, not the density.
-
-The other three presets are deliberately unchanged — the rear spawning and the
-inattention are both gated behind fields that default to off, and a SHA-256
-over every observation and reward across `sparse`/`normal`/`dense` × three
-seeds is identical before and after this change — so the published benchmark
-stays comparable. `unforgiving` is a fourth cell you opt into with
-`--cells unforgiving`. Results: `BENCHMARK_unforgiving.md`.
+Traffic also spawns *behind* the ego and catches up at its own cruise speed,
+and 60% of drivers are **inattentive** — they act on a view of the road
+`reaction_delay_s` (1.5 s) stale, long enough that a car stopping in front of
+them cannot always be avoided. An attentive follower can always avoid a car
+that stops; the delay is the danger, not the density. Results:
+`BENCHMARK_unforgiving.md`.
 
 Training now uses domain randomization by default: after the warm-up
 curriculum, every episode rolls fresh conditions from the `random` ranges,
@@ -248,6 +267,7 @@ step to inspect the exact breakdown.
 | `LEARNING_GUIDE.md` | Guided walkthrough and suggested experiments |
 | `docs/LAB_NOTES.md` | Running log of findings, surprises, and open questions |
 | `BENCHMARK_unforgiving.md` | Held-out results including the `unforgiving` cell |
+| `BENCHMARK_v1.md` | Held-out results for the pre-v2 world (historical) |
 | `BENCHMARK.md` | Held-out results (historical — regenerate with `autodrive_rl.benchmark`) |
 
 ## Run verification

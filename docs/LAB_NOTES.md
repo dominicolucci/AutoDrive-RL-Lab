@@ -9,6 +9,7 @@ and what I changed as a result. An entry with no surprise in it does not belong
 here.
 
 **Start here if you're reading this cold:**
+[The unrealistic obstacle was causing the unrealistic behaviour](#2026-09-29--the-crawling-was-the-obstacles-fault-not-the-agents) ·
 [Safety scores reward standing still](#2026-08-20--a-safety-score-can-be-won-by-not-driving) ·
 [The loophole was in the map, not the reward](#2026-09-28--the-loophole-was-in-the-world-not-the-reward-function) ·
 [A stateful evaluator is order-dependent](#2026-09-28--the-random-baseline-was-answering-a-different-question-each-time) ·
@@ -17,7 +18,82 @@ here.
 
 ---
 
+## 2026-09-29 — The crawling was the obstacle's fault, not the agent's
+
+**Expected:** removing the static obstacles was a realism tidy-up. The
+interesting work was the stall rule and fault attribution; cutting the
+obstacles was housekeeping on the way there.
+
+**What happened:** it was the single largest behavioural change this project
+has produced, and it fixed the headline problem on its own. The same
+checkpoint, unretrained, went from **3.0 m/s over 269 m** on `dense` to
+**9.9 m/s over 879 m**. The rule-based driver went from **12% safe to 80%**.
+Nothing about either policy changed. Only the world did.
+
+**Why:** an immovable block sitting in a live lane, with traffic queued behind
+it, is not a driving problem — it is a wall that appears mid-motorway with no
+warning and no escape once you are committed. Faced with that, crawling is
+genuinely the optimal policy, and no amount of reward tuning would have said
+otherwise. I had spent two sessions treating the crawling as a scoring problem
+and then as a spawn-geometry problem. It was neither. It was one unrealistic
+object, and the agent was responding to it correctly.
+
+**Changed:** static obstacles are gone from every traffic preset, replaced by
+vehicles genuinely travelling slower than the flow (6-9 m/s in a 29 m/s
+stream). Same requirement to plan ahead and change lanes; no fiction. The
+`obstacle` behaviour still exists for the lane-keeping scenario, which is what
+it was built for.
+
+**Generalised:** when an agent does something that looks stupid, check whether
+the environment is asking it to. A policy responding rationally to an absurd
+world is not a broken policy, and every hour spent reshaping its incentives is
+an hour not spent fixing the absurdity. This is the second time on this project
+the answer was in the world model rather than the reward — the first was the
+[spawn geometry](#2026-09-28--the-loophole-was-in-the-world-not-the-reward-function).
+I should have looked here first.
+
+---
+
+## 2026-09-29 — The random baseline was never "38% safe"
+
+**Expected:** adding a stall rule would mostly affect the trained agent, since
+it is the one that crawls.
+
+**What happened:** it demolished the random baseline. Random driving now scores
+**0% safe completion in every cell**, because it obstructs the lane in 93-95%
+of episodes. The old figure was 29-38%.
+
+**Why:** the old safe-completion metric asked only "did you avoid crashing and
+avoid leaving the road?" A policy pressing buttons at random drifts to a halt
+and sits there, satisfying both. It was never safe driving — it was a stopped
+car being scored as a successful one. The stall rule does not make random
+driving worse; it stops mislabelling what it always was.
+
+**Changed:** a stall is a failure, with its own column. "Safe completion" now
+means reaching the step limit without a collision, an off-road event, *or* an
+obstruction.
+
+**Worth the care it took:** the rule only counts as a stall when the lane ahead
+is clear. Slowing behind traffic is ordinary driving, and a version that
+punished mere slowness would have taught the agent to drive *into* stopped
+queues rather than behind them. The calibration check is that the rule-based
+driver never triggers it — it stalls 0% on every preset, while the trained
+agent stalls 4% on `dense` and 39% on `unforgiving`. That gap is the rule
+discriminating between obstruction and driving, which is exactly the job.
+
+**Also added:** collisions are now split by fault. Being rear-ended while
+driving normally is the follower's failure and costs far less than a crash the
+ego caused. Without that split, the aggressive rear traffic would have punished
+the agent for events it could not prevent, and it would have learned
+superstitions — some unrelated behaviour that happened to correlate with fewer
+unavoidable hits.
+
+---
+
 ## 2026-09-28 — The loophole was in the world, not the reward function
+
+> Figures below are world-model v1. The direction holds, the magnitudes moved
+> once the obstacles were removed a day later.
 
 **Expected:** the agent crawls because the reward pays too little for speed, so
 the fix is to raise the speed coefficient and retrain.
@@ -98,6 +174,11 @@ company, and assert equality.
 ---
 
 ## 2026-08-20 — A safety score can be won by not driving
+
+> Figures below are world-model v1 (`BENCHMARK_v1.md`). The obstacles that
+> caused this were removed on 2026-09-29 and the numbers moved sharply — see
+> [the crawling was the obstacle's fault](#2026-09-29--the-crawling-was-the-obstacles-fault-not-the-agents).
+> The lesson stands; the measurements are historical.
 
 **Expected:** the trained agent would look good on easy traffic and degrade on
 hard traffic, with the safe-completion rate telling that story.

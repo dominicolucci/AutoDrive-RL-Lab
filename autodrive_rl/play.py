@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--traffic", type=int, default=None, help="override car count")
     parser.add_argument("--obstacles", type=int, default=None, help="override obstacle count")
+    parser.add_argument(
+        "--slow-vehicles", type=int, default=None,
+        help="override the number of slow-moving vehicles",
+    )
     parser.add_argument("--reactive", type=float, default=None, help="override reactive fraction 0..1")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--fps", type=int, default=30)
@@ -73,6 +77,7 @@ def main(argv: list[str] | None = None) -> None:
         args.scenario_preset,
         traffic=args.traffic,
         obstacles=args.obstacles,
+        slow_vehicles=args.slow_vehicles,
         reactive=args.reactive,
         rng=np.random.default_rng(args.seed),
     )

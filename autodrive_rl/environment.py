@@ -45,6 +45,13 @@ REAR_SPAWN_RANGE_M = 150.0   # farthest a car enters behind the ego
 REAR_SPAWN_MIN_M = 60.0      # nearest it may enter, so nothing appears on top
 SPAWN_EGO_CLEAR_M = 22.0     # keep-out bubble around the ego at spawn time
 
+# Slow vehicles ---------------------------------------------------------------
+# The realistic replacement for a static obstacle: a car genuinely travelling
+# slower than the flow. It creates the same "plan ahead and change lanes"
+# problem without pretending a wall can sit in a live motorway lane.
+SLOW_VEHICLE_SPEED_RANGE_MPS = (6.0, 9.0)
+SLOW_VEHICLE_EGO_CLEAR_M = 55.0
+
 REACTIVE_TIME_HEADWAY_S = 1.5
 REACTIVE_BRAKE_MPS2 = 4.0
 REACTIVE_EMERGENCY_BRAKE_MPS2 = 9.0
@@ -150,6 +157,7 @@ class DrivingEnv:
         self.ego_x_m = 0.0
         self.ego_lateral_speed_mps = 0.0
         self.ego_speed_mps = 0.0
+        self._stall_steps = 0
         self.distance_m = 0.0
         self.steps = 0
         self.previous_action = Action.MAINTAIN
@@ -236,6 +244,7 @@ class DrivingEnv:
         self.grade_score = 100.0
         self._graded_lane = self.current_lane
         self._cut_off_timer = 0
+        self._stall_steps = 0
         self.traffic = []
         if self.scenario == "traffic":
             self._spawn_initial_traffic()
@@ -297,20 +306,41 @@ class DrivingEnv:
         elif self._cut_off_timer > 0:
             self._cut_off_timer -= 1
 
-        collision = self._has_collision()
+        struck = self._colliding_car()
+        collision = struck is not None
+        at_fault = collision and self._ego_at_fault(struck)
         off_road = self._is_off_road()
-        terminated = collision or off_road
+
+        # Sitting still in a live lane is a failure in its own right, not a
+        # safe outcome. The grace period is what keeps ordinary slowing — and
+        # stop-and-go behind a queue — legal.
+        obstructing = (
+            self.ego_speed_mps < cfg.stall_speed_mps
+            and self._ego_front_gap_m() > cfg.stall_clear_gap_m
+        )
+        if obstructing:
+            self._stall_steps += 1
+        else:
+            self._stall_steps = 0
+        stall_limit = max(1, round(cfg.stall_grace_s / cfg.dt_seconds))
+        stalled = self._stall_steps >= stall_limit
+
+        terminated = collision or off_road or stalled
         truncated = self.steps >= cfg.max_steps
 
         reward = self._reward(
             action=action,
             forward_step=forward_step,
             collision=collision,
+            at_fault=at_fault,
             off_road=off_road,
+            stalled=stalled,
         )
         self.previous_action = action
         observation = self._observation()
-        return observation, reward, terminated, truncated, self._info(collision, off_road)
+        return observation, reward, terminated, truncated, self._info(
+            collision, off_road, at_fault=at_fault, stalled=stalled
+        )
 
     def sensor_snapshot(self) -> dict[str, np.ndarray | float | int]:
         """Return human-readable sensor values in meters and meters/second."""
@@ -379,7 +409,9 @@ class DrivingEnv:
         action: Action,
         forward_step: float,
         collision: bool,
+        at_fault: bool,
         off_road: bool,
+        stalled: bool,
     ) -> float:
         cfg = self.config
         sensors = self.sensor_snapshot()
@@ -479,7 +511,19 @@ class DrivingEnv:
                 ) * (1.0 - max(0.0, lateral_clear) / NEAR_MISS_LAT_M)
                 near_miss = min(near_miss, -1.2 * squeeze)
 
-        terminal = -500.0 if collision else (-350.0 if off_road else 0.0)
+        # A crash the ego caused is the full penalty. One it could not have
+        # prevented still costs something real — a car that stops caring about
+        # being hit stops watching its mirrors, which is its own bad lesson —
+        # but nothing like as much, or the agent learns superstitions from
+        # events outside its control.
+        if collision:
+            terminal = -500.0 if at_fault else -150.0
+        elif off_road:
+            terminal = -350.0
+        elif stalled:
+            terminal = -300.0
+        else:
+            terminal = 0.0
 
         self.last_reward_terms = {
             "progress": progress,
@@ -510,7 +554,7 @@ class DrivingEnv:
             + near_miss
         )
         step_score = 100.0 * max(0.0, 1.0 + safety_penalty / GRADE_PENALTY_SCALE)
-        if collision or off_road:
+        if collision or off_road or stalled:
             self.grade_score = 0.0
         else:
             self.grade_score += GRADE_EMA_ALPHA * (step_score - self.grade_score)
@@ -525,6 +569,7 @@ class DrivingEnv:
         inattentive_fraction = 0.0 if spec is None else spec.inattentive_fraction
         rear_traffic = False if spec is None else spec.rear_traffic
         self._spawn_obstacles()
+        self._spawn_slow_vehicles()
         moving_target = count + len(self.traffic)
         attempts = 0
         while len(self.traffic) < moving_target and attempts < 500:
@@ -560,6 +605,40 @@ class DrivingEnv:
                     behavior=behavior, cruise_speed_mps=cruise,
                 )
             )
+
+    def _spawn_slow_vehicles(self) -> None:
+        """Cars genuinely travelling slower than the flow.
+
+        These replace static obstacles in every traffic preset. They present
+        the same problem — something ahead you cannot simply follow, so you
+        must plan a lane change — while remaining a thing that actually
+        happens on a motorway.
+        """
+
+        spec = self.scenario_spec
+        if spec is None or spec.slow_vehicle_count == 0:
+            return
+        cfg = self.config
+        placed = 0
+        attempts = 0
+        while placed < spec.slow_vehicle_count and attempts < 200:
+            attempts += 1
+            lane = int(self.rng.integers(0, cfg.lane_count))
+            y_m = float(
+                self.rng.uniform(SLOW_VEHICLE_EGO_CLEAR_M, cfg.sensor_range_m + 55.0)
+            )
+            if not self._spawn_gap_ok(lane, y_m):
+                continue
+            cruise = float(self.rng.uniform(*SLOW_VEHICLE_SPEED_RANGE_MPS))
+            if not self._entry_rear_ok(lane, y_m, cruise):
+                continue
+            self.traffic.append(
+                TrafficCar(
+                    lane, y_m, cruise, int(self.rng.integers(0, 6)),
+                    behavior="cruiser", cruise_speed_mps=cruise,
+                )
+            )
+            placed += 1
 
     def _spawn_obstacles(self) -> None:
         spec = self.scenario_spec
@@ -1044,11 +1123,34 @@ class DrivingEnv:
                 follower_speed = self.ego_speed_mps
         return max(0.0, gap), follower_speed
 
-    def _has_collision(self) -> bool:
-        # Touch-inclusive: even a slight brush against another car's bumper
-        # or door panel counts as a crash, exactly like a rear-end. A merge
-        # only "works" if the ego never makes contact with the cars that
-        # frame the gap.
+    def _ego_front_gap_m(self) -> float:
+        """Clear distance ahead of the ego in its own lane.
+
+        Used by the stall rule to tell obstruction from ordinary slowing: a
+        car stopped behind a queue is driving normally, a car stopped on an
+        open lane is blocking the motorway.
+        """
+
+        cfg = self.config
+        lane = self.current_lane
+        gap = cfg.sensor_range_m
+        for car in self.traffic:
+            if lane not in self._occupied_lanes(car) or car.y_m <= 0.0:
+                continue
+            candidate = car.y_m - cfg.car_length_m
+            if candidate < gap:
+                gap = candidate
+        return max(0.0, gap)
+
+    def _colliding_car(self) -> TrafficCar | None:
+        """The car the ego is in contact with, if any.
+
+        Touch-inclusive: even a slight brush against another car's bumper or
+        door panel counts, exactly like a rear-end. A merge only "works" if
+        the ego never touches the cars that frame the gap. Returning the car
+        rather than a boolean is what makes fault attribution possible.
+        """
+
         cfg = self.config
         for car in self.traffic:
             car_x = self.traffic_x_m(car)
@@ -1057,8 +1159,34 @@ class DrivingEnv:
                 abs(car_x - self.ego_x_m) <= cfg.car_width_m + CONTACT_EPSILON_M
             )
             if longitudinal_overlap and lateral_overlap:
-                return True
-        return False
+                return car
+        return None
+
+    def _ego_at_fault(self, car: TrafficCar) -> bool:
+        """Whether this contact is the ego's responsibility.
+
+        Not every crash is a driving error, and scoring them alike teaches the
+        wrong lesson: an agent punished for things it could not prevent goes
+        looking for some unrelated behaviour that happens to correlate with
+        fewer of them. The split below follows how responsibility is actually
+        assigned on the road.
+        """
+
+        cfg = self.config
+        # Moving sideways into someone: the merging driver owns the gap.
+        if abs(self.ego_lateral_speed_mps) >= DIVIDER_CROSSING_SPEED_MPS:
+            return True
+        # Struck something ahead: you are responsible for the space in front
+        # of you, whether it is moving, slow, or stationary.
+        if car.y_m > 0.0:
+            return True
+        # Struck from behind. Normally the follower's failure — unless the ego
+        # had stopped or was crawling in a live lane, which is the
+        # unreasonable act that created the situation.
+        return self.ego_speed_mps < cfg.stall_speed_mps
+
+    def _has_collision(self) -> bool:
+        return self._colliding_car() is not None
 
     def _is_off_road(self) -> bool:
         return (
@@ -1066,9 +1194,18 @@ class DrivingEnv:
             > self.config.road_half_width_m
         )
 
-    def _info(self, collision: bool, off_road: bool) -> dict[str, Any]:
+    def _info(
+        self,
+        collision: bool,
+        off_road: bool,
+        *,
+        at_fault: bool = False,
+        stalled: bool = False,
+    ) -> dict[str, Any]:
         return {
             "collision": collision,
+            "at_fault": at_fault,
+            "stalled": stalled,
             "off_road": off_road,
             "driving_grade": float(self.grade_score),
             "grade_letter": grade_letter(self.grade_score),

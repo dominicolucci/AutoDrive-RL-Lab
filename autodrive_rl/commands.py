@@ -100,6 +100,7 @@ def _world_overrides(args: list[str], values: Mapping[str, Any]) -> None:
     """Car count / obstacle count / reactive fraction, shared by drive + train."""
     _put(args, "--traffic", values.get("traffic"))
     _put(args, "--obstacles", values.get("obstacles"))
+    _put(args, "--slow-vehicles", values.get("slow_vehicles"))
     _put(args, "--reactive", values.get("reactive"))
 
 
