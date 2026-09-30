@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from collections import deque
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -34,6 +35,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--traffic", type=int, default=None, help="override car count")
     parser.add_argument("--obstacles", type=int, default=None, help="override obstacle count")
+    parser.add_argument(
+        "--slow-vehicles", type=int, default=None,
+        help="override the number of slow-moving vehicles",
+    )
+    parser.add_argument(
+        "--render-every", type=int, default=0, metavar="N",
+        help=(
+            "watch every Nth training episode in a window; 0 (the default) "
+            "trains headless. Purely observational — it cannot change the run."
+        ),
+    )
+    parser.add_argument(
+        "--render-speed", type=float, default=10.0,
+        help="playback rate for watched episodes (default 10x real time)",
+    )
+    parser.add_argument(
+        "--snapshot-every", type=int, default=0, metavar="N",
+        help=(
+            "save a checkpoint every N episodes as <output>_epNNNN.npz, so the "
+            'whole run can be replayed with play --model-sequence "…_ep*.npz"'
+        ),
+    )
     parser.add_argument("--reactive", type=float, default=None, help="override reactive fraction 0..1")
     parser.add_argument(
         "--tracking",
@@ -129,10 +152,14 @@ def train(
     scenario_preset: str = "random",
     traffic: int | None = None,
     obstacles: int | None = None,
+    slow_vehicles: int | None = None,
     reactive: float | None = None,
     tracking: bool = False,
     tracking_uri: str | None = None,
     run_name: str | None = None,
+    render_every: int = 0,
+    render_speed: float = 10.0,
+    snapshot_every: int = 0,
     eval_every: int = 25,
     eval_episodes: int = 3,
     log_every: int = 5,
@@ -148,6 +175,7 @@ def train(
             scenario_preset,
             traffic=traffic,
             obstacles=obstacles,
+            slow_vehicles=slow_vehicles,
             reactive=reactive,
             rng=np.random.default_rng(0),
         )
@@ -162,6 +190,20 @@ def train(
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     best_path = output_path.with_name(f"{output_path.stem}_best{output_path.suffix}")
     best_eval_return = -np.inf
+
+    # Watching training is strictly observational: the renderer is imported
+    # lazily so a headless box, CI and the benchmark never touch Tk, and it
+    # only ever reads the environment. It must not consume a single random
+    # draw or reorder a step, or the run stops being reproducible — a test
+    # asserts that training with and without it produces identical weights.
+    renderer = None
+    if render_every > 0:
+        try:
+            from .renderer import TopDownRenderer
+
+            renderer = TopDownRenderer(speed=render_speed, title="AutoDrive RL Lab - training")
+        except Exception as error:  # noqa: BLE001 - watching is never worth a crash
+            print(f"Live view unavailable ({error}); training headless.", file=sys.stderr)
     tracker = create_tracker(
         tracking,
         run_name or f"{output_path.stem}-seed{seed}",
@@ -179,6 +221,7 @@ def train(
             "scenario_preset": scenario_preset,
             "traffic": traffic,
             "obstacles": obstacles,
+            "slow_vehicles": slow_vehicles,
             "reactive": reactive,
         }
     )
@@ -229,6 +272,7 @@ def train(
                 seed=seed + episode,
                 options={"randomize_start": True} if handover else None,
             )
+            watching = renderer is not None and episode % render_every == 0
             episode_return = 0.0
             episode_losses: list[float] = []
             speed_sum = 0.0
@@ -246,6 +290,24 @@ def train(
                 episode_return += reward
                 speed_sum += float(info["speed_mps"])
                 final_info = info
+                if watching and renderer is not None:
+                    if renderer.closed:
+                        renderer = None
+                        watching = False
+                    else:
+                        renderer.render(
+                            env,
+                            policy_name="training",
+                            action=int(action),
+                            episode=episode,
+                            episode_reward=episode_return,
+                            epsilon=agent.epsilon,
+                            caption=f"training · episode {episode}/{episodes}",
+                        )
+                        renderer.tick()
+                        if renderer.skip_requested:
+                            renderer.skip_requested = False
+                            watching = False
                 if done:
                     break
 
@@ -280,6 +342,13 @@ def train(
             for cell in EVAL_CELLS:
                 record[f"eval_{cell}_return"] = ""
                 record[f"eval_{cell}_safe_rate"] = ""
+
+            if snapshot_every > 0 and (episode % snapshot_every == 0 or episode == episodes):
+                # Zero-padded so `play --model-sequence` globs them in order.
+                snapshot = output_path.with_name(
+                    f"{output_path.stem}_ep{episode:04d}{output_path.suffix}"
+                )
+                agent.save(snapshot)
 
             should_evaluate = eval_every > 0 and (episode % eval_every == 0 or episode == episodes)
             if should_evaluate:
@@ -344,6 +413,8 @@ def train(
                     f"outcome={outcome}{eval_text}"
                 )
 
+        if renderer is not None:
+            renderer.close()
         agent.save(output_path)
         _write_metrics(metrics_path, records)
         print(f"\nSaved final model: {output_path}")
@@ -381,10 +452,14 @@ def main(argv: list[str] | None = None) -> None:
         scenario_preset=args.scenario_preset,
         traffic=args.traffic,
         obstacles=args.obstacles,
+        slow_vehicles=args.slow_vehicles,
         reactive=args.reactive,
         tracking=args.tracking,
         tracking_uri=None,
         run_name=args.run_name,
+        render_every=args.render_every,
+        render_speed=args.render_speed,
+        snapshot_every=args.snapshot_every,
         eval_every=args.eval_every,
         eval_episodes=args.eval_episodes,
         log_every=args.log_every,

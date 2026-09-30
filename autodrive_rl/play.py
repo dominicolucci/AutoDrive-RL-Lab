@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import glob
+import re
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +48,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument(
+        "--speed", type=float, default=1.0,
+        help=(
+            "playback rate: 1 is real time, 20 turns a 90-second episode into "
+            "four and a half. Adjustable live with + and -."
+        ),
+    )
+    parser.add_argument(
+        "--model-sequence", type=str, default=None, metavar="GLOB",
+        help=(
+            "watch a training run learn: play every checkpoint matching this "
+            "glob in order, one episode each, captioned with its episode "
+            'number. Pair with train --snapshot-every, e.g. '
+            '--model-sequence "models/run_ep*.npz"'
+        ),
+    )
+    parser.add_argument(
         "--autopilot-model",
         type=Path,
         default=Path("models/autopilot.npz"),
@@ -68,6 +86,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def checkpoint_sequence(pattern: str) -> list[Path]:
+    """Checkpoints matching a glob, in training order.
+
+    Sorted by the episode number embedded in the filename rather than
+    lexically, so `_ep0100` follows `_ep0050` instead of sorting next to
+    `_ep1000`. Snapshots are written zero-padded for exactly that reason, but
+    a hand-assembled set still orders correctly this way.
+    """
+
+    def episode_of(path: Path) -> tuple[int, str]:
+        match = re.search(r"_ep(\d+)", path.stem)
+        return (int(match.group(1)) if match else -1, path.stem)
+
+    return sorted((Path(p) for p in glob.glob(pattern)), key=episode_of)
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.record is not None and args.policy != "manual":
@@ -82,7 +116,18 @@ def main(argv: list[str] | None = None) -> None:
         rng=np.random.default_rng(args.seed),
     )
     env = DrivingEnv(scenario=args.scenario, seed=args.seed, scenario_spec=scenario_spec)
-    renderer = TopDownRenderer(fps=args.fps)
+    renderer = TopDownRenderer(fps=args.fps, speed=args.speed)
+
+    # Checkpoint sequence: one episode per saved snapshot, in training order,
+    # so a whole run's learning plays back as a single clip.
+    sequence: list[Path] = []
+    sequence_index = 0
+    if args.model_sequence:
+        sequence = checkpoint_sequence(args.model_sequence)
+        if not sequence:
+            raise SystemExit(f"No checkpoints matched: {args.model_sequence}")
+        args.policy = "dqn"
+        args.model = sequence[0]
     heuristic = HeuristicDriver()
     agent: DQNAgent | None = None
     if args.policy == "dqn":
@@ -108,6 +153,16 @@ def main(argv: list[str] | None = None) -> None:
             autopilot_agent = None
     autopilot_on = False
     autopilot_notice = 0
+
+    def caption_for() -> str | None:
+        if not sequence:
+            return None
+        stem = sequence[sequence_index].stem
+        match = re.search(r"_ep(\d+)", stem)
+        position = f"{sequence_index + 1}/{len(sequence)}"
+        if match:
+            return f"{position}  ·  after {int(match.group(1))} training episodes"
+        return f"{position}  ·  {stem}"
 
     observation, _ = env.reset(seed=args.seed)
     episode = 1
@@ -142,10 +197,32 @@ def main(argv: list[str] | None = None) -> None:
             if autopilot_notice > 0:
                 autopilot_notice -= 1
 
+            if renderer.skip_requested:
+                renderer.skip_requested = False
+                terminal_frames = 0
+                terminal_message = None
+                episode += 1
+                if sequence:
+                    sequence_index += 1
+                    if sequence_index >= len(sequence):
+                        break
+                    agent = DQNAgent.load(sequence[sequence_index], seed=args.seed)
+                observation, _ = env.reset(seed=args.seed + episode)
+                heuristic.reset()
+                episode_reward = 0.0
+                autopilot_on = False
+
             if terminal_frames > 0:
                 terminal_frames -= 1
                 if terminal_frames == 0:
                     episode += 1
+                    # Every checkpoint drives exactly one episode, so the clip
+                    # runs from the first snapshot to the last without input.
+                    if sequence:
+                        sequence_index += 1
+                        if sequence_index >= len(sequence):
+                            break
+                        agent = DQNAgent.load(sequence[sequence_index], seed=args.seed)
                     observation, _ = env.reset(seed=args.seed + episode)
                     heuristic.reset()
                     episode_reward = 0.0
@@ -211,6 +288,7 @@ def main(argv: list[str] | None = None) -> None:
                 message=terminal_message,
                 autopilot=autopilot_state,
                 q_values=q_values,
+                caption=caption_for(),
             )
             renderer.tick()
     finally:

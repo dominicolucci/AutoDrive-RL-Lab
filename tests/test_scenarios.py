@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import unittest.mock
 from dataclasses import replace
 from pathlib import Path
 
@@ -556,6 +557,81 @@ class StallAndFaultTests(unittest.TestCase):
             for speed in slow:
                 self.assertGreater(speed, 0.0)
                 self.assertLess(speed, env.config.traffic_min_speed_mps + 0.1)
+
+
+class WatchingTrainingTests(unittest.TestCase):
+    """The live view must be a window onto training, never part of it."""
+
+    def _train(self, tmp: Path, **kw) -> bytes:
+        from autodrive_rl.train import train
+
+        train(
+            episodes=6, env_config=EnvConfig(), seed=11, curriculum=False,
+            scenario_preset="normal", eval_every=0, log_every=0,
+            output_path=tmp / "m.npz", metrics_path=tmp / "m.csv", **kw
+        )
+        return (tmp / "m.npz").read_bytes()
+
+    def test_a_broken_renderer_never_stops_training(self) -> None:
+        """A headless box, a missing display, a Tk that will not start — none
+        of that is worth losing a training run over."""
+        import autodrive_rl.train as train_module
+
+        with tempfile.TemporaryDirectory() as raw:
+            with unittest.mock.patch.dict(
+                "sys.modules",
+                {"autodrive_rl.renderer": None},  # import raises ImportError
+            ):
+                weights = self._train(Path(raw), render_every=2)
+        self.assertGreater(len(weights), 0)
+
+    def test_snapshots_are_zero_padded_and_periodic(self) -> None:
+        from autodrive_rl.train import train
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            train(
+                episodes=9, env_config=EnvConfig(), seed=3, curriculum=False,
+                scenario_preset="normal", eval_every=0, log_every=0,
+                snapshot_every=3,
+                output_path=tmp / "run.npz", metrics_path=tmp / "run.csv",
+            )
+            names = sorted(p.name for p in tmp.glob("run_ep*.npz"))
+        self.assertEqual(names, ["run_ep0003.npz", "run_ep0006.npz", "run_ep0009.npz"])
+
+    def test_watching_does_not_change_the_trained_weights(self) -> None:
+        """The invariant the whole feature rests on.
+
+        If drawing consumed a single random draw, or reordered a step, every
+        seeded run would diverge and the live view would quietly corrupt the
+        experiment it exists to show. This project has already been bitten by
+        exactly that once, so it is asserted rather than assumed.
+        """
+
+        try:
+            import tkinter
+
+            probe = tkinter.Tk()
+        except Exception:  # noqa: BLE001
+            self.skipTest("no display available")
+        probe.destroy()
+
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            headless = self._train(Path(a))
+            watched = self._train(Path(b), render_every=2, render_speed=20.0)
+        self.assertEqual(headless, watched)
+
+    def test_snapshots_are_off_by_default(self) -> None:
+        from autodrive_rl.train import train
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            train(
+                episodes=4, env_config=EnvConfig(), seed=3, curriculum=False,
+                scenario_preset="normal", eval_every=0, log_every=0,
+                output_path=tmp / "run.npz", metrics_path=tmp / "run.csv",
+            )
+            self.assertEqual(list(tmp.glob("run_ep*.npz")), [])
 
 
 class LaneChangeTests(unittest.TestCase):

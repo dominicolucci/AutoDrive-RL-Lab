@@ -82,8 +82,21 @@ class TopDownRenderer:
     CAR_HALF_W = 30
     CAR_HALF_L = 38
 
-    def __init__(self, *, fps: int = 30, title: str = "AutoDrive RL Lab") -> None:
+    #: Selectable playback rates. A 900-step episode is 90 s of wall clock at
+    #: 1x, which is far too slow to watch a policy improve over a training
+    #: run; 20x turns it into four and a half seconds.
+    SPEEDS: tuple[float, ...] = (0.5, 1.0, 2.0, 5.0, 10.0, 20.0)
+
+    def __init__(
+        self,
+        *,
+        fps: int = 30,
+        title: str = "AutoDrive RL Lab",
+        speed: float = 1.0,
+    ) -> None:
         self.fps = max(1, fps)
+        self.speed = self._nearest_speed(speed)
+        self.skip_requested = False
         self.closed = False
         self.paused = False
         self.reset_requested = False
@@ -122,6 +135,12 @@ class TopDownRenderer:
             self.reset_requested = True
         elif key == "space":
             self.autopilot_toggle_requested = True
+        elif key in {"plus", "equal", "kp_add"}:
+            self.change_speed(1)
+        elif key in {"minus", "underscore", "kp_subtract"}:
+            self.change_speed(-1)
+        elif key == "n":
+            self.skip_requested = True
 
     def _on_key_release(self, event: tk.Event[Any]) -> None:
         self.keys_down.discard(str(event.keysym).lower())
@@ -201,6 +220,7 @@ class TopDownRenderer:
         message: str | None = None,
         autopilot: str | None = None,
         q_values: np.ndarray | None = None,
+        caption: str | None = None,
     ) -> None:
         if self.closed:
             return
@@ -216,6 +236,7 @@ class TopDownRenderer:
             episode=episode,
             episode_reward=episode_reward,
             epsilon=epsilon,
+            caption=caption,
         )
         if self.paused:
             self._draw_overlay("PAUSED", "Press P to continue")
@@ -690,6 +711,7 @@ class TopDownRenderer:
         episode: int,
         episode_reward: float,
         epsilon: float | None,
+        caption: str | None = None,
     ) -> None:
         canvas = self.canvas
         panel_left = 620
@@ -708,9 +730,24 @@ class TopDownRenderer:
             font=("Arial", 20, "bold"),
         )
         canvas.create_text(
-            left, 60, text="A small car learning a big idea", anchor="w",
-            fill=TEXT_DIM, font=("Arial", 10),
+            left, 60, text=caption or "A small car learning a big idea", anchor="w",
+            fill=ACCENT if caption else TEXT_DIM,
+            font=("Arial", 10, "bold") if caption else ("Arial", 10),
         )
+
+        # Playback rate. Only worth the pixels when it is not real time, but
+        # then it matters a great deal — at 20x it is the difference between
+        # "the agent is broken" and "you are watching four seconds of a run".
+        if self.speed != 1.0:
+            chip = f"{self.speed:g}x".replace(".0x", "x")
+            canvas.create_text(
+                right, 34, text=chip, anchor="e", fill=ACCENT,
+                font=("Arial", 13, "bold"),
+            )
+            canvas.create_text(
+                right, 52, text="+ / -  speed", anchor="e", fill=TEXT_DIM,
+                font=("Arial", 8),
+            )
 
         # Speedometer arc.
         gauge_cx, gauge_cy, gauge_r = (left + right) / 2, 158, 66
@@ -842,8 +879,26 @@ class TopDownRenderer:
             )
             y += 30
 
-        # Keycap-styled controls.
+        # Keycap-styled controls. Two rows now: the new keys matter most to
+        # someone watching a long training replay, which is when they most
+        # need to be discoverable without reading the README.
         controls = [("P", "pause"), ("R", "restart"), ("Q", "quit")]
+        extras = [("N", "next"), ("+/-", "speed")]
+        kx = left
+        ky = self.height - 72
+        for key, meaning in extras:
+            width = 24 if len(key) == 1 else 34
+            self._rounded_rect(kx, ky, kx + width, ky + 22, 6, fill=CARD_BG, outline=CARD_EDGE)
+            canvas.create_text(
+                kx + width / 2, ky + 11, text=key, fill=TEXT_MAIN,
+                font=("Arial", 10, "bold"),
+            )
+            canvas.create_text(
+                kx + width + 8, ky + 11, text=meaning, anchor="w", fill=TEXT_DIM,
+                font=("Arial", 10),
+            )
+            kx += width + 16 + 9 * len(meaning)
+
         kx = left
         ky = self.height - 42
         for key, meaning in controls:
@@ -889,8 +944,21 @@ class TopDownRenderer:
         fraction = (x_m + env.config.road_half_width_m) / env.config.road_width_m
         return self.road_left + fraction * (self.road_right - self.road_left)
 
+    @classmethod
+    def _nearest_speed(cls, value: float) -> float:
+        return min(cls.SPEEDS, key=lambda option: abs(option - float(value)))
+
+    def change_speed(self, direction: int) -> float:
+        """Step one place up or down the rate ladder, clamped at the ends."""
+
+        index = self.SPEEDS.index(self.speed)
+        self.speed = self.SPEEDS[
+            max(0, min(len(self.SPEEDS) - 1, index + direction))
+        ]
+        return self.speed
+
     def tick(self) -> None:
-        frame_duration = 1.0 / self.fps
+        frame_duration = 1.0 / (self.fps * self.speed)
         elapsed = time.perf_counter() - self.last_frame_time
         if elapsed < frame_duration:
             time.sleep(frame_duration - elapsed)

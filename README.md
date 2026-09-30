@@ -54,6 +54,10 @@ Open the launcher:
 python -m autodrive_rl
 ```
 
+The window opens on an **Overview** tab explaining what the simulation is, what
+the agent senses, what it is rewarded for, and what each of the other tabs does
+— so the project explains itself without the README open alongside.
+
 Everything the project can do is a form in that window — drive the simulation,
 train an agent, clone your own driving, benchmark policies against each other.
 Pick settings, press Run, watch the output stream in. The command being run is
@@ -79,10 +83,44 @@ python -m autodrive_rl.play --policy manual
 - D or Right: steer right
 - P: pause
 - R: restart
+- N: skip to the next episode
+- `+` / `-`: playback speed, from 0.5x to 20x
 - Q or Escape: quit
 
 Only one action is chosen per simulation step. That matches the DQN's discrete
 action space.
+
+## Watch it learn
+
+A 900-step episode is 90 seconds of real time, which is far too slow to sit
+through while a policy improves. Two flags fix that.
+
+Draw every Nth training episode, at up to 20x, while everything in between runs
+headless at full speed:
+
+```bash
+python -m autodrive_rl.train --episodes 600 --render-every 25 --render-speed 10
+```
+
+The live view is **strictly observational**. It reads the environment and
+nothing else — it consumes no randomness and reorders no step, so a seeded run
+produces byte-identical weights whether or not you watched it. That is asserted
+by a test rather than assumed, because this project has already been bitten once
+by a single misplaced random draw desynchronising every seeded world.
+
+Better still, save a checkpoint every N episodes and replay the whole run
+afterwards as a single clip:
+
+```bash
+python -m autodrive_rl.train --episodes 600 --snapshot-every 50
+python -m autodrive_rl.play --model-sequence "models/autodrive_dqn_ep*.npz" --speed 10
+```
+
+Each snapshot drives one episode, in training order, captioned with how many
+episodes of experience it had at the time. It goes from crashing immediately, to
+wandering, to driving — which is the clearest single view of what the training
+loop actually does. Snapshots are zero-padded (`_ep0050`, `_ep0100`) so the glob
+orders correctly.
 
 ## Train the agent
 

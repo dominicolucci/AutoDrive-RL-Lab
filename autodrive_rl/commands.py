@@ -97,7 +97,9 @@ def _toggle(args: list[str], flag: str, value: bool, default: bool) -> None:
 
 
 def _world_overrides(args: list[str], values: Mapping[str, Any]) -> None:
-    """Car count / obstacle count / reactive fraction, shared by drive + train."""
+    """Car count / slow vehicles / obstacles / reactive fraction, shared by
+    drive and train. Obstacles are no longer used by any preset but the
+    override stays available for anyone who wants one."""
     _put(args, "--traffic", values.get("traffic"))
     _put(args, "--obstacles", values.get("obstacles"))
     _put(args, "--slow-vehicles", values.get("slow_vehicles"))
@@ -123,6 +125,9 @@ def build_drive_args(values: Mapping[str, Any]) -> list[str]:
     _world_overrides(args, values)
     _put(args, "--seed", values.get("seed"), default=7)
     _put(args, "--fps", values.get("fps"), default=30)
+    _put(args, "--speed", values.get("speed"), default=1.0)
+    if values.get("sequence_enabled") and values.get("model_sequence"):
+        args.extend(["--model-sequence", str(values["model_sequence"])])
 
     if values.get("record_enabled") and values.get("record_path"):
         _put(args, "--record", values.get("record_path"))
@@ -144,6 +149,10 @@ def build_train_args(values: Mapping[str, Any]) -> list[str]:
     _toggle(args, "--handover", values.get("handover", False), default=False)
     _toggle(args, "--tracking", values.get("tracking", True), default=True)
     _put(args, "--run-name", values.get("run_name"))
+    _put(args, "--render-every", values.get("render_every"), default=0)
+    if values.get("render_every"):
+        _put(args, "--render-speed", values.get("render_speed"), default=10.0)
+    _put(args, "--snapshot-every", values.get("snapshot_every"), default=0)
     _put(args, "--eval-every", values.get("eval_every"), default=25)
     _put(args, "--eval-episodes", values.get("eval_episodes"), default=3)
     _put(args, "--log-every", values.get("log_every"), default=5)

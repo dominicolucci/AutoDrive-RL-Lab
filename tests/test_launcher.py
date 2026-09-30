@@ -32,6 +32,7 @@ from autodrive_rl.commands import (
     discover_assets,
     validate,
 )
+from autodrive_rl.play import checkpoint_sequence
 from autodrive_rl.jobrunner import (
     Job,
     JobState,
@@ -160,6 +161,43 @@ def test_benchmark_markdown_and_output():
     )
     assert "--markdown" in args
     assert args[-2:] == ["--out", "BENCHMARK_current.md"]
+
+
+# ── Watching the agent learn ─────────────────────────────────────────────────
+
+
+def test_playback_speed_is_omitted_at_real_time_and_carried_otherwise():
+    assert "--speed" not in build_drive_args({"policy": "heuristic", "speed": 1.0})
+    assert build_drive_args({"policy": "heuristic", "speed": 10.0})[-2:] == ["--speed", "10.0"]
+
+
+def test_checkpoint_sequence_needs_the_checkbox():
+    """A glob sitting in the box must not hijack an ordinary drive."""
+    base = {"policy": "dqn", "model": "m.npz", "model_sequence": "models/x_ep*.npz"}
+    assert "--model-sequence" not in build_drive_args({**base, "sequence_enabled": False})
+    assert build_drive_args({**base, "sequence_enabled": True})[-2:] == [
+        "--model-sequence", "models/x_ep*.npz"
+    ]
+
+
+def test_training_watch_and_snapshot_flags():
+    assert build_train_args({"render_every": 0, "snapshot_every": 0}) == []
+    args = build_train_args({"render_every": 25, "render_speed": 20.0, "snapshot_every": 50})
+    assert args[:2] == ["--render-every", "25"]
+    assert "--render-speed" in args and "20.0" in args
+    assert args[-2:] == ["--snapshot-every", "50"]
+
+
+def test_checkpoints_replay_in_training_order_not_alphabetical(tmp_path: Path):
+    """`_ep0100` must follow `_ep0050`, not sort beside `_ep1000`."""
+    for name in ("run_ep1000", "run_ep0050", "run_ep0500", "run_ep0100"):
+        (tmp_path / f"{name}.npz").write_bytes(b"")
+    order = [p.stem for p in checkpoint_sequence(str(tmp_path / "*.npz"))]
+    assert order == ["run_ep0050", "run_ep0100", "run_ep0500", "run_ep1000"]
+
+
+def test_checkpoint_sequence_is_empty_when_nothing_matches(tmp_path: Path):
+    assert checkpoint_sequence(str(tmp_path / "nope_*.npz")) == []
 
 
 def test_build_args_dispatches_by_module():
@@ -338,11 +376,15 @@ def test_launcher_window_builds_and_previews_every_tab():
     root.withdraw()
     try:
         app = LauncherApp(root, project_root=Path.cwd())
-        assert set(app.panels) == {"Drive", "Train", "Clone", "Benchmark"}
+        assert set(app.panels) == {"Overview", "Drive", "Train", "Clone", "Benchmark"}
         for index in range(len(app.panels)):
             app.notebook.select(index)
             root.update_idletasks()
             app.update_preview()
+            if not app.current_panel.module:
+                # Overview has nothing to run; the preview says so rather
+                # than showing a broken command.
+                continue
             argv = app.current_command()
             assert argv[0] == sys.executable
             assert "autodrive_rl." in argv[3]

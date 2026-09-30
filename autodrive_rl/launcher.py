@@ -62,6 +62,7 @@ POLL_MS = 120
 LOG_LIMIT = 4000  # lines retained; older ones are trimmed so memory stays flat
 
 MODE_BLURB = {
+    "Overview": "What the simulation is, what the agent senses, and what each tab does.",
     "Drive": "Watch a policy drive, or take the wheel yourself.",
     "Train": "Teach an agent to drive by trial and reward.",
     "Clone": "Learn to drive by imitating recorded human demonstrations.",
@@ -167,6 +168,89 @@ class Panel(ttk.Frame):
         setattr(self, f"_combos_{tag}", boxes)
 
 
+class OverviewPanel(Panel):
+    """What this is, before any settings are touched.
+
+    The other four tabs assume you already know what an observation is, what
+    the presets change, and why a safety percentage on its own is misleading.
+    This one does not.
+    """
+
+    module = ""
+    run_label = "Open the Drive tab"
+
+    SECTIONS: tuple[tuple[str, str], ...] = (
+        (
+            "What you are looking at",
+            "A car drives along a three-lane motorway. It has no map and no "
+            "route: at every tenth of a second it picks one of five controls "
+            "(hold, accelerate, brake, steer left, steer right) from 16 sensor "
+            "readings - its own speed and position, and the distance and "
+            "closing speed of the nearest car ahead and behind in each lane.",
+        ),
+        (
+            "What it is rewarded for",
+            "Covering ground, holding a sensible speed, staying centred. It is "
+            "penalised for tailgating, straddling lines, speeding, cutting "
+            "people up, near misses, crashing, leaving the road, and blocking "
+            "a live lane. The balance between those is the whole experiment - "
+            "get it wrong and the car finds a loophole rather than learning to "
+            "drive.",
+        ),
+        (
+            "The four difficulties",
+            "sparse is 4 cars and an open road. normal is 9. dense adds slow "
+            "vehicles and drivers who change lanes. unforgiving adds traffic "
+            "closing from behind, most of it driven by someone looking at "
+            "their phone - stopping is genuinely dangerous there and safe "
+            "nowhere else.",
+        ),
+        (
+            "The four tabs",
+            "Drive watches a policy, or hands you the keys. Train teaches a "
+            "network from scratch by trial and error. Clone copies your own "
+            "recorded driving instead, which fails in an interesting way. "
+            "Benchmark scores any of them on identical held-out worlds.",
+        ),
+        (
+            "Watching it learn",
+            "Training is slow to watch in real time, so Train can draw every "
+            "Nth episode at up to 20x, and save a checkpoint every N episodes. "
+            "Point Drive's checkpoint sequence at those snapshots and the whole "
+            "run replays as one clip: crashing, then wandering, then driving.",
+        ),
+    )
+
+    def build(self) -> None:
+        ttk.Label(
+            self,
+            text="An agent learning to drive, and the instruments to see whether it did.",
+            style="Intro.TLabel",
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 14))
+
+        for index, (heading, body) in enumerate(self.SECTIONS, start=1):
+            ttk.Label(self, text=heading, style="Card.TLabel").grid(
+                row=index, column=0, sticky="nw", padx=(0, 18), pady=6
+            )
+            ttk.Label(
+                self, text=body, style="Hint.TLabel", justify="left", wraplength=620
+            ).grid(row=index, column=1, columnspan=2, sticky="w", pady=6)
+
+        ttk.Label(
+            self,
+            text=(
+                "In the simulation window:  W A S D or arrows to drive  ·  "
+                "P pause  ·  R restart  ·  N next episode  ·  + / - speed  ·  Q quit"
+            ),
+            style="Hint.TLabel",
+            justify="left",
+        ).grid(row=len(self.SECTIONS) + 1, column=0, columnspan=3, sticky="w", pady=(16, 0))
+
+    def values(self) -> dict[str, Any]:
+        return {}
+
+
 class DrivePanel(Panel):
     module = "play"
     run_label = "▶  Drive"
@@ -188,8 +272,8 @@ class DrivePanel(Panel):
         f = Field(self, 3, "Overrides", "leave blank to use the difficulty preset")
         spacer(f.holder, "cars")
         self.traffic = entry(f.holder, "", 5, change)
-        spacer(f.holder, "obstacles")
-        self.obstacles = entry(f.holder, "", 5, change)
+        spacer(f.holder, "slow")
+        self.slow_vehicles = entry(f.holder, "", 5, change)
         spacer(f.holder, "reactive")
         self.reactive = entry(f.holder, "", 6, change)
 
@@ -198,11 +282,23 @@ class DrivePanel(Panel):
         spacer(f.holder, "frames / sec")
         self.fps = entry(f.holder, 30, 8, change)
 
-        f = Field(self, 5, "Record", "captures demonstrations for cloning")
+        f = Field(self, 5, "Playback", "1 is real time; + / - adjust it live")
+        spacer(f.holder, "speed")
+        self.speed = combo(f.holder, ("0.5", "1", "2", "5", "10", "20"), "1", 6, change)
+        spacer(f.holder, "x")
+
+        f = Field(
+            self, 6, "Checkpoint sequence",
+            "plays a whole training run as one clip",
+        )
+        self.sequence_enabled = check(f.holder, "replay", False, change)
+        self.sequence = entry(f.holder, "models/autodrive_dqn_ep*.npz", 30, change)
+
+        f = Field(self, 7, "Record", "captures demonstrations for cloning")
         self.record_enabled = check(f.holder, "save my driving to", False, change)
         self.record_path = entry(f.holder, "demos/me.npz", 22, change)
 
-        f = Field(self, 6, "Autopilot", "hold SPACE to hand over control")
+        f = Field(self, 8, "Autopilot", "hold SPACE to hand over control")
         self.autopilot_enabled = check(f.holder, "enable", False, change)
         self.autopilot_model = combo(f.holder, (), "", 28, change)
         self.register_combo("autopilot", f.holder)
@@ -222,10 +318,13 @@ class DrivePanel(Panel):
             "scenario": self.scenario.get(),
             "preset": self.preset.get(),
             "traffic": as_int(self.traffic),
-            "obstacles": as_int(self.obstacles),
+            "slow_vehicles": as_int(self.slow_vehicles),
             "reactive": as_float(self.reactive),
             "seed": as_int(self.seed, 7),
             "fps": as_int(self.fps, 30),
+            "speed": as_float(self.speed, 1.0),
+            "sequence_enabled": self.sequence_enabled.get(),
+            "model_sequence": self.sequence.get().strip(),
             "record_enabled": self.record_enabled.get(),
             "record_path": self.record_path.get().strip(),
             "autopilot_enabled": self.autopilot_enabled.get(),
@@ -256,8 +355,8 @@ class TrainPanel(Panel):
         f = Field(self, 3, "Overrides", "leave blank to use the difficulty preset")
         spacer(f.holder, "cars")
         self.traffic = entry(f.holder, "", 5, change)
-        spacer(f.holder, "obstacles")
-        self.obstacles = entry(f.holder, "", 5, change)
+        spacer(f.holder, "slow")
+        self.slow_vehicles = entry(f.holder, "", 5, change)
         spacer(f.holder, "reactive")
         self.reactive = entry(f.holder, "", 6, change)
 
@@ -277,10 +376,28 @@ class TrainPanel(Panel):
         spacer(f.holder, "worlds; log every")
         self.log_every = entry(f.holder, 5, 6, change)
 
-        f = Field(self, 7, "Save model to")
+        f = Field(
+            self, 7, "Watch it learn",
+            "purely observational - it cannot change the run",
+        )
+        spacer(f.holder, "draw every")
+        self.render_every = entry(f.holder, 0, 6, change)
+        spacer(f.holder, "episodes at")
+        self.render_speed = combo(f.holder, ("1", "2", "5", "10", "20"), "10", 5, change)
+        spacer(f.holder, "x")
+
+        f = Field(
+            self, 8, "Snapshots",
+            "replay them later from Drive's checkpoint sequence",
+        )
+        spacer(f.holder, "save a checkpoint every")
+        self.snapshot_every = entry(f.holder, 0, 6, change)
+        spacer(f.holder, "episodes")
+
+        f = Field(self, 9, "Save model to")
         self.output = entry(f.holder, "models/autodrive_dqn.npz", 34, change)
 
-        f = Field(self, 8, "Save metrics to")
+        f = Field(self, 10, "Save metrics to")
         self.metrics = entry(f.holder, "runs/training_metrics.csv", 34, change)
 
     def values(self) -> dict[str, Any]:
@@ -291,7 +408,7 @@ class TrainPanel(Panel):
             "scenario": self.scenario.get(),
             "preset": self.preset.get(),
             "traffic": as_int(self.traffic),
-            "obstacles": as_int(self.obstacles),
+            "slow_vehicles": as_int(self.slow_vehicles),
             "reactive": as_float(self.reactive),
             "curriculum": self.curriculum.get(),
             "handover": self.handover.get(),
@@ -300,6 +417,9 @@ class TrainPanel(Panel):
             "eval_every": as_int(self.eval_every, 25),
             "eval_episodes": as_int(self.eval_episodes, 3),
             "log_every": as_int(self.log_every, 5),
+            "render_every": as_int(self.render_every, 0),
+            "render_speed": as_float(self.render_speed, 10.0),
+            "snapshot_every": as_int(self.snapshot_every, 0),
             "output": self.output.get().strip(),
             "metrics": self.metrics.get().strip(),
         }
@@ -511,6 +631,7 @@ class LauncherApp:
         self.notebook.pack(fill="both", expand=True)
         self.panels: dict[str, Panel] = {}
         for title, panel_class in (
+            ("Overview", OverviewPanel),
             ("Drive", DrivePanel),
             ("Train", TrainPanel),
             ("Clone", ClonePanel),
@@ -583,10 +704,25 @@ class LauncherApp:
 
     def current_command(self) -> list[str]:
         panel = self.current_panel
+        if not panel.module:
+            raise ValueError("this tab has nothing to run")
         return module_command(panel.module, build_args(panel.module, panel.values()))
 
     def update_preview(self) -> None:
         if not self._ready:
+            return
+        panel_now = self.current_panel
+        if not panel_now.module:
+            self.preview.configure(state="normal")
+            self.preview.delete("1.0", "end")
+            self.preview.insert(
+                "1.0", "Nothing to run from this tab - pick Drive, Train, "
+                "Clone or Benchmark.", "cmd",
+            )
+            self.preview.configure(state="disabled")
+            self.subtitle.configure(text=MODE_BLURB.get("Overview", ""))
+            if not (self.job and self.job.is_running):
+                self.run_button.configure(text=panel_now.run_label)
             return
         try:
             text = format_command(self.current_command())
@@ -644,6 +780,9 @@ class LauncherApp:
         if self.job and self.job.is_running:
             return
         panel = self.current_panel
+        if not panel.module:
+            self.notebook.select(1)
+            return
         problems = validate(panel.module, panel.values())
         if problems:
             messagebox.showwarning("Check the settings", "\n\n".join(problems))
