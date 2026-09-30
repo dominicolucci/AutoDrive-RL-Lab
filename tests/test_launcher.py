@@ -354,39 +354,95 @@ def test_job_runs_in_the_requested_directory(tmp_path: Path):
 # ── GUI smoke test (needs a display) ─────────────────────────────────────────
 
 
-def _display_available() -> bool:
+@pytest.fixture(scope="module")
+def tk_root():
+    """A single Tk root shared by every GUI test in this file.
+
+    Creating and destroying roots repeatedly inside one process makes Windows
+    Tcl fail with `invalid command name "tcl_findLibrary"` once a second
+    interpreter is torn down. One root, reused, avoids that entirely — and is
+    faster besides.
+    """
+
+    tkinter = pytest.importorskip("tkinter")
     try:
-        import tkinter
-
         root = tkinter.Tk()
-    except Exception:
-        return False
+    except Exception as error:  # noqa: BLE001 - no display, or no usable Tk
+        pytest.skip(f"no usable display: {error}")
+    root.withdraw()
+    yield root
     root.destroy()
-    return True
 
 
-@pytest.mark.skipif(not _display_available(), reason="no display available")
-def test_launcher_window_builds_and_previews_every_tab():
-    """Construct the real window and walk its tabs, without showing it."""
-    import tkinter
+@pytest.fixture
+def launcher(tk_root):
+    """A freshly built launcher inside the shared root."""
 
     from autodrive_rl.launcher import LauncherApp
 
-    root = tkinter.Tk()
-    root.withdraw()
-    try:
-        app = LauncherApp(root, project_root=Path.cwd())
-        assert set(app.panels) == {"Overview", "Drive", "Train", "Clone", "Benchmark"}
-        for index in range(len(app.panels)):
-            app.notebook.select(index)
-            root.update_idletasks()
-            app.update_preview()
-            if not app.current_panel.module:
-                # Overview has nothing to run; the preview says so rather
-                # than showing a broken command.
-                continue
-            argv = app.current_command()
-            assert argv[0] == sys.executable
-            assert "autodrive_rl." in argv[3]
-    finally:
-        root.destroy()
+    def build():
+        for child in tk_root.winfo_children():
+            child.destroy()
+        return LauncherApp(tk_root, project_root=Path.cwd())
+
+    yield build
+    for child in tk_root.winfo_children():
+        child.destroy()
+
+
+def test_hiding_settings_never_changes_what_runs(launcher, tk_root):
+    """Progressive disclosure is a layout choice, not a behavioural one.
+
+    Every panel keeps its secondary controls in a collapsed section. Those
+    widgets still exist and still feed `values()`, so the command a panel
+    builds must be identical whether the section is open or shut — a
+    disclosure that silently dropped a flag would be far worse than a
+    crowded form.
+    """
+
+    app = launcher()
+    for name, panel in app.panels.items():
+        if not hasattr(panel, "advanced"):
+            continue
+        assert not panel.advanced.open, f"{name} should start collapsed"
+        shut = build_args(panel.module, panel.values())
+        panel.advanced.toggle()
+        tk_root.update_idletasks()
+        assert panel.advanced.open
+        opened = build_args(panel.module, panel.values())
+        assert shut == opened, name
+        panel.advanced.toggle()
+        assert not panel.advanced.open
+
+
+def test_every_panel_keeps_its_everyday_settings_visible(launcher):
+    """The point of the split: the common case must be reachable without
+    opening anything."""
+
+    app = launcher()
+    for name, panel in app.panels.items():
+        if not hasattr(panel, "advanced"):
+            continue
+        visible = [
+            child for child in panel.winfo_children()
+            if child.winfo_manager() == "grid" and child is not panel.advanced.body
+        ]
+        assert len(visible) <= 18, f"{name} still shows too much at once"
+
+
+def test_launcher_window_builds_and_previews_every_tab(launcher, tk_root):
+    """Construct the real window and walk its tabs, without showing it."""
+
+    app = launcher()
+    assert set(app.panels) == {"Overview", "Drive", "Train", "Clone", "Benchmark"}
+    for index in range(len(app.panels)):
+        app.notebook.select(index)
+        tk_root.update_idletasks()
+        app.update_preview()
+        if not app.current_panel.module:
+            # Overview has nothing to run; the preview says so rather than
+            # showing a broken command.
+            continue
+        argv = app.current_command()
+        assert argv[0] == sys.executable
+        assert "autodrive_rl." in argv[3]

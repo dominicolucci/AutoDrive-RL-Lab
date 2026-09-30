@@ -134,6 +134,48 @@ def as_float(var: tk.StringVar, fallback: float | None = None) -> float | None:
 # ── Panels ───────────────────────────────────────────────────────────────────
 
 
+class Disclosure:
+    """A collapsible block of secondary settings.
+
+    Every panel used to show everything at once, which made the common case —
+    pick a policy, pick a difficulty, press go — hard to find inside fifteen
+    controls. The split is by *how often a setting is touched*, not by how
+    advanced it is: seeds, paths and overrides are perfectly ordinary, they
+    are just rarely changed twice in a row.
+    """
+
+    def __init__(self, parent: tk.Widget, row: int, label: str = "More settings") -> None:
+        self.label = label
+        self.open = False
+        self.header = ttk.Label(parent, style="Toggle.TLabel", cursor="hand2")
+        self.header.grid(row=row, column=0, columnspan=3, sticky="w", pady=(16, 2))
+        self.header.bind("<Button-1>", lambda _e: self.toggle())
+        self.header.bind(
+            "<Enter>", lambda _e: self.header.configure(style="ToggleHover.TLabel")
+        )
+        self.header.bind(
+            "<Leave>", lambda _e: self.header.configure(style="Toggle.TLabel")
+        )
+
+        self.body = ttk.Frame(parent, style="Card.TFrame")
+        self.body.grid(row=row + 1, column=0, columnspan=3, sticky="ew")
+        self.body.grid_columnconfigure(1, weight=1)
+        self.body.grid_remove()
+        self._paint()
+
+    def _paint(self) -> None:
+        arrow = "\u25be" if self.open else "\u25b8"
+        self.header.configure(text=f"{arrow}  {self.label}")
+
+    def toggle(self) -> None:
+        self.open = not self.open
+        if self.open:
+            self.body.grid()
+        else:
+            self.body.grid_remove()
+        self._paint()
+
+
 class Panel(ttk.Frame):
     """Base for the four mode panels."""
 
@@ -181,43 +223,36 @@ class OverviewPanel(Panel):
 
     SECTIONS: tuple[tuple[str, str], ...] = (
         (
-            "What you are looking at",
-            "A car drives along a three-lane motorway. It has no map and no "
-            "route: at every tenth of a second it picks one of five controls "
-            "(hold, accelerate, brake, steer left, steer right) from 16 sensor "
-            "readings - its own speed and position, and the distance and "
-            "closing speed of the nearest car ahead and behind in each lane.",
+            "The car",
+            "Three lanes, no map, no route. Every tenth of a second it picks one "
+            "of five controls - hold, accelerate, brake, steer left, steer right - "
+            "from 16 sensor readings: its own speed and position, and the gap and "
+            "closing speed to the nearest car ahead and behind in each lane.",
         ),
         (
-            "What it is rewarded for",
-            "Covering ground, holding a sensible speed, staying centred. It is "
-            "penalised for tailgating, straddling lines, speeding, cutting "
-            "people up, near misses, crashing, leaving the road, and blocking "
-            "a live lane. The balance between those is the whole experiment - "
-            "get it wrong and the car finds a loophole rather than learning to "
-            "drive.",
+            "The scoring",
+            "Rewarded for covering ground at a sensible speed, centred in a lane. "
+            "Penalised for tailgating, speeding, cutting people up, near misses, "
+            "crashing, leaving the road, and blocking a live lane. Get that "
+            "balance wrong and it finds a loophole instead of learning to drive.",
         ),
         (
-            "The four difficulties",
-            "sparse is 4 cars and an open road. normal is 9. dense adds slow "
-            "vehicles and drivers who change lanes. unforgiving adds traffic "
-            "closing from behind, most of it driven by someone looking at "
-            "their phone - stopping is genuinely dangerous there and safe "
-            "nowhere else.",
+            "The difficulties",
+            "sparse is 4 cars. normal is 9. dense adds slow vehicles and lane "
+            "changers. unforgiving adds traffic closing from behind, most of it "
+            "driven by someone looking at their phone.",
         ),
         (
-            "The four tabs",
-            "Drive watches a policy, or hands you the keys. Train teaches a "
-            "network from scratch by trial and error. Clone copies your own "
-            "recorded driving instead, which fails in an interesting way. "
-            "Benchmark scores any of them on identical held-out worlds.",
+            "The tabs",
+            "Drive watches a policy or hands you the keys. Train teaches one by "
+            "trial and reward. Clone copies your own driving instead. Benchmark "
+            "scores any of them on identical held-out worlds.",
         ),
         (
-            "Watching it learn",
-            "Training is slow to watch in real time, so Train can draw every "
-            "Nth episode at up to 20x, and save a checkpoint every N episodes. "
-            "Point Drive's checkpoint sequence at those snapshots and the whole "
-            "run replays as one clip: crashing, then wandering, then driving.",
+            "Seeing it learn",
+            "Train can draw every Nth episode at up to 20x and save a checkpoint "
+            "every N episodes. Point Drive's checkpoint sequence at those and the "
+            "whole run replays as one clip: crashing, wandering, then driving.",
         ),
     )
 
@@ -227,15 +262,15 @@ class OverviewPanel(Panel):
             text="An agent learning to drive, and the instruments to see whether it did.",
             style="Intro.TLabel",
             justify="left",
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 14))
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         for index, (heading, body) in enumerate(self.SECTIONS, start=1):
             ttk.Label(self, text=heading, style="Card.TLabel").grid(
-                row=index, column=0, sticky="nw", padx=(0, 18), pady=6
+                row=index, column=0, sticky="nw", padx=(0, 18), pady=3
             )
             ttk.Label(
-                self, text=body, style="Hint.TLabel", justify="left", wraplength=620
-            ).grid(row=index, column=1, columnspan=2, sticky="w", pady=6)
+                self, text=body, style="Hint.TLabel", justify="left", wraplength=700
+            ).grid(row=index, column=1, columnspan=2, sticky="w", pady=3)
 
         ttk.Label(
             self,
@@ -245,7 +280,7 @@ class OverviewPanel(Panel):
             ),
             style="Hint.TLabel",
             justify="left",
-        ).grid(row=len(self.SECTIONS) + 1, column=0, columnspan=3, sticky="w", pady=(16, 0))
+        ).grid(row=len(self.SECTIONS) + 1, column=0, columnspan=3, sticky="w", pady=(12, 0))
 
     def values(self) -> dict[str, Any]:
         return {}
@@ -253,10 +288,12 @@ class OverviewPanel(Panel):
 
 class DrivePanel(Panel):
     module = "play"
-    run_label = "▶  Drive"
+    run_label = "\u25b6  Drive"
 
     def build(self) -> None:
         change = self.changed
+
+        # Everyday: who is driving, in what traffic, how fast to play it back.
         f = Field(self, 0, "Who drives", "manual puts you at the keyboard")
         self.policy = combo(f.holder, DRIVE_POLICIES, "heuristic", 20, change)
 
@@ -264,12 +301,34 @@ class DrivePanel(Panel):
         self.model = combo(f.holder, (), "", 36, change)
         self.register_combo("model", f.holder)
 
-        f = Field(self, 2, "World")
-        self.scenario = combo(f.holder, SCENARIOS, "traffic", 12, change)
-        spacer(f.holder, "difficulty")
-        self.preset = combo(f.holder, PRESETS, "normal", 12, change)
+        f = Field(self, 2, "Difficulty", "unforgiving adds traffic from behind")
+        self.preset = combo(f.holder, PRESETS, "normal", 16, change)
 
-        f = Field(self, 3, "Overrides", "leave blank to use the difficulty preset")
+        f = Field(self, 3, "Speed", "1 is real time; + / - adjust it live")
+        self.speed = combo(f.holder, ("0.5", "1", "2", "5", "10", "20"), "1", 6, change)
+        spacer(f.holder, "x")
+
+        adv = Disclosure(self, 4)
+        body = adv.body
+        self.advanced = adv
+
+        f = Field(body, 0, "Replay a run", "plays a whole training run as one clip")
+        self.sequence_enabled = check(f.holder, "checkpoint sequence", False, change)
+        self.sequence = entry(f.holder, "models/autodrive_dqn_ep*.npz", 30, change)
+
+        f = Field(body, 1, "Record", "captures demonstrations for cloning")
+        self.record_enabled = check(f.holder, "save my driving to", False, change)
+        self.record_path = entry(f.holder, "demos/me.npz", 22, change)
+
+        f = Field(body, 2, "Autopilot", "hold SPACE to hand over control")
+        self.autopilot_enabled = check(f.holder, "enable", False, change)
+        self.autopilot_model = combo(f.holder, (), "", 28, change)
+        self.register_combo("autopilot", f.holder)
+
+        f = Field(body, 3, "World", "'lane' drops the traffic entirely")
+        self.scenario = combo(f.holder, SCENARIOS, "traffic", 12, change)
+
+        f = Field(body, 4, "Overrides", "leave blank to use the difficulty preset")
         spacer(f.holder, "cars")
         self.traffic = entry(f.holder, "", 5, change)
         spacer(f.holder, "slow")
@@ -277,31 +336,10 @@ class DrivePanel(Panel):
         spacer(f.holder, "reactive")
         self.reactive = entry(f.holder, "", 6, change)
 
-        f = Field(self, 4, "Seed")
+        f = Field(body, 5, "Seed")
         self.seed = entry(f.holder, 7, 8, change)
         spacer(f.holder, "frames / sec")
         self.fps = entry(f.holder, 30, 8, change)
-
-        f = Field(self, 5, "Playback", "1 is real time; + / - adjust it live")
-        spacer(f.holder, "speed")
-        self.speed = combo(f.holder, ("0.5", "1", "2", "5", "10", "20"), "1", 6, change)
-        spacer(f.holder, "x")
-
-        f = Field(
-            self, 6, "Checkpoint sequence",
-            "plays a whole training run as one clip",
-        )
-        self.sequence_enabled = check(f.holder, "replay", False, change)
-        self.sequence = entry(f.holder, "models/autodrive_dqn_ep*.npz", 30, change)
-
-        f = Field(self, 7, "Record", "captures demonstrations for cloning")
-        self.record_enabled = check(f.holder, "save my driving to", False, change)
-        self.record_path = entry(f.holder, "demos/me.npz", 22, change)
-
-        f = Field(self, 8, "Autopilot", "hold SPACE to hand over control")
-        self.autopilot_enabled = check(f.holder, "enable", False, change)
-        self.autopilot_model = combo(f.holder, (), "", 28, change)
-        self.register_combo("autopilot", f.holder)
 
     def refresh_assets(self, assets: Assets) -> None:
         names = list(assets.model_names)
@@ -334,51 +372,22 @@ class DrivePanel(Panel):
 
 class TrainPanel(Panel):
     module = "train"
-    run_label = "▶  Start training"
+    run_label = "\u25b6  Start training"
 
     def build(self) -> None:
         change = self.changed
-        f = Field(self, 0, "Length", "300 episodes ≈ a few minutes")
+
+        # Everyday: how long, how hard, and whether you want to watch.
+        f = Field(self, 0, "Length", "300 episodes \u2248 a few minutes")
         self.episodes = entry(f.holder, 300, 8, change)
-        spacer(f.holder, "episodes, max")
-        self.max_steps = entry(f.holder, 900, 8, change)
-        spacer(f.holder, "steps each")
+        spacer(f.holder, "episodes")
 
-        f = Field(self, 1, "Seed")
-        self.seed = entry(f.holder, 7, 8, change)
-
-        f = Field(self, 2, "World")
-        self.scenario = combo(f.holder, SCENARIOS, "traffic", 12, change)
-        spacer(f.holder, "difficulty")
-        self.preset = combo(f.holder, PRESETS, "random", 12, change)
-
-        f = Field(self, 3, "Overrides", "leave blank to use the difficulty preset")
-        spacer(f.holder, "cars")
-        self.traffic = entry(f.holder, "", 5, change)
-        spacer(f.holder, "slow")
-        self.slow_vehicles = entry(f.holder, "", 5, change)
-        spacer(f.holder, "reactive")
-        self.reactive = entry(f.holder, "", 6, change)
-
-        f = Field(self, 4, "Options")
-        self.curriculum = check(f.holder, "curriculum", True, change)
-        self.handover = check(f.holder, "handover", False, change)
-        self.tracking = check(f.holder, "MLflow", True, change)
-
-        f = Field(self, 5, "Run name", "labels the run in MLflow")
-        self.run_name = entry(f.holder, "", 26, change)
-
-        f = Field(self, 6, "Evaluate")
-        spacer(f.holder, "every")
-        self.eval_every = entry(f.holder, 25, 6, change)
-        spacer(f.holder, "episodes, over")
-        self.eval_episodes = entry(f.holder, 3, 6, change)
-        spacer(f.holder, "worlds; log every")
-        self.log_every = entry(f.holder, 5, 6, change)
+        f = Field(self, 1, "Difficulty", "'random' varies the world every episode")
+        self.preset = combo(f.holder, PRESETS, "random", 16, change)
 
         f = Field(
-            self, 7, "Watch it learn",
-            "purely observational - it cannot change the run",
+            self, 2, "Watch it learn",
+            "0 trains headless; it cannot change the run",
         )
         spacer(f.holder, "draw every")
         self.render_every = entry(f.holder, 0, 6, change)
@@ -387,17 +396,55 @@ class TrainPanel(Panel):
         spacer(f.holder, "x")
 
         f = Field(
-            self, 8, "Snapshots",
-            "replay them later from Drive's checkpoint sequence",
+            self, 3, "Snapshots",
+            "replay the whole run later from the Drive tab",
         )
-        spacer(f.holder, "save a checkpoint every")
+        spacer(f.holder, "save every")
         self.snapshot_every = entry(f.holder, 0, 6, change)
         spacer(f.holder, "episodes")
 
-        f = Field(self, 9, "Save model to")
+        adv = Disclosure(self, 4)
+        body = adv.body
+        self.advanced = adv
+
+        f = Field(body, 0, "Episode length")
+        self.max_steps = entry(f.holder, 900, 8, change)
+        spacer(f.holder, "steps each")
+
+        f = Field(body, 1, "Seed")
+        self.seed = entry(f.holder, 7, 8, change)
+
+        f = Field(body, 2, "World", "'lane' drops the traffic entirely")
+        self.scenario = combo(f.holder, SCENARIOS, "traffic", 12, change)
+
+        f = Field(body, 3, "Overrides", "leave blank to use the difficulty preset")
+        spacer(f.holder, "cars")
+        self.traffic = entry(f.holder, "", 5, change)
+        spacer(f.holder, "slow")
+        self.slow_vehicles = entry(f.holder, "", 5, change)
+        spacer(f.holder, "reactive")
+        self.reactive = entry(f.holder, "", 6, change)
+
+        f = Field(body, 4, "Options")
+        self.curriculum = check(f.holder, "curriculum", True, change)
+        self.handover = check(f.holder, "handover", False, change)
+        self.tracking = check(f.holder, "MLflow", True, change)
+
+        f = Field(body, 5, "Run name", "labels the run in MLflow")
+        self.run_name = entry(f.holder, "", 26, change)
+
+        f = Field(body, 6, "Evaluate")
+        spacer(f.holder, "every")
+        self.eval_every = entry(f.holder, 25, 6, change)
+        spacer(f.holder, "episodes, over")
+        self.eval_episodes = entry(f.holder, 3, 6, change)
+        spacer(f.holder, "worlds; log every")
+        self.log_every = entry(f.holder, 5, 6, change)
+
+        f = Field(body, 7, "Save model to")
         self.output = entry(f.holder, "models/autodrive_dqn.npz", 34, change)
 
-        f = Field(self, 10, "Save metrics to")
+        f = Field(body, 8, "Save metrics to")
         self.metrics = entry(f.holder, "runs/training_metrics.csv", 34, change)
 
     def values(self) -> dict[str, Any]:
@@ -453,7 +500,11 @@ class ClonePanel(Panel):
         f = Field(self, 2, "Save model to")
         self.output = entry(f.holder, "models/clone.npz", 30, change)
 
-        f = Field(self, 3, "Training")
+        adv = Disclosure(self, 3)
+        body = adv.body
+        self.advanced = adv
+
+        f = Field(body, 0, "Training")
         spacer(f.holder, "epochs")
         self.epochs = entry(f.holder, 60, 6, change)
         spacer(f.holder, "batch")
@@ -461,7 +512,7 @@ class ClonePanel(Panel):
         spacer(f.holder, "learning rate")
         self.learning_rate = entry(f.holder, 0.001, 8, change)
 
-        f = Field(self, 4, "Validation")
+        f = Field(body, 1, "Validation")
         self.val_fraction = entry(f.holder, 0.1, 6, change)
         spacer(f.holder, "held back, seed")
         self.seed = entry(f.holder, 0, 6, change)
@@ -538,15 +589,21 @@ class BenchmarkPanel(Panel):
 
         f = Field(self, 3, "Sample", "100 gives a publishable sample")
         self.episodes = entry(f.holder, 100, 8, change)
-        spacer(f.holder, "episodes per cell, max")
+        spacer(f.holder, "episodes per cell")
+
+        adv = Disclosure(self, 4)
+        body = adv.body
+        self.advanced = adv
+
+        f = Field(body, 0, "Episode length")
         self.max_steps = entry(f.holder, 900, 8, change)
         spacer(f.holder, "steps")
 
-        f = Field(self, 4, "Held-out seeds", "far from anything used in training")
+        f = Field(body, 1, "Held-out seeds", "far from anything used in training")
         self.seed_start = entry(f.holder, 350000, 12, change)
         spacer(f.holder, "onwards")
 
-        f = Field(self, 5, "Output")
+        f = Field(body, 2, "Output")
         self.markdown = check(f.holder, "markdown table", True, change)
         spacer(f.holder, "write to")
         self.out = entry(f.holder, "BENCHMARK_current.md", 24, change)

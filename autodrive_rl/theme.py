@@ -249,6 +249,15 @@ def apply_theme(root: tk.Tk) -> dict[str, tkfont.Font]:
     )
     style.map("Vertical.TScrollbar", background=[("active", HOVER)])
 
+    # A disclosure header reads as a control, not a caption: accent-coloured,
+    # and it brightens under the pointer so it is obviously clickable.
+    style.configure(
+        "Toggle.TLabel", background=CARD_BG, foreground=ACCENT, font=fonts["tab"]
+    )
+    style.configure(
+        "ToggleHover.TLabel", background=CARD_BG, foreground=TEXT_MAIN, font=fonts["tab"]
+    )
+
     style.configure("Separator.TFrame", background=CARD_EDGE)
 
     return fonts

@@ -58,6 +58,13 @@ The window opens on an **Overview** tab explaining what the simulation is, what
 the agent senses, what it is rewarded for, and what each of the other tabs does
 — so the project explains itself without the README open alongside.
 
+Each mode shows only its everyday settings — who drives, how hard, how fast —
+with the rest behind a **More settings** disclosure. The split is by how often a
+setting is touched rather than how advanced it is: seeds, paths and overrides
+are perfectly ordinary, they are just rarely changed twice in a row. Collapsing
+is purely a layout choice; a test asserts the command a panel builds is
+identical whether the section is open or shut.
+
 Everything the project can do is a form in that window — drive the simulation,
 train an agent, clone your own driving, benchmark policies against each other.
 Pick settings, press Run, watch the output stream in. The command being run is
